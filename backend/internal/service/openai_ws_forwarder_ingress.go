@@ -1346,6 +1346,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	defer releaseSessionLease()
 
 	turn := 1
+	defer func() {
+		// The outer handler still holds the first frame. After a later turn
+		// fails it must not replay that frame on another account, or discard
+		// the current turn's previous_response_id to make it movable.
+		var failover *UpstreamFailoverError
+		if turn > 1 && HasCodexSessionCapacity(c) && errors.As(returnErr, &failover) {
+			returnErr = NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "session_retry_requires_full_history", nil)
+		}
+	}()
 	rejectedFieldRetryState = newOpenAIResponsesRejectedFieldRetryState(currentPayload)
 	turnRetry := 0
 	turnPrevRecoveryTried := false

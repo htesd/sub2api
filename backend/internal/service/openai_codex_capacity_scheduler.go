@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -39,7 +41,14 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			owner = s.codexCapacityRegistry().boundOwner(state.input)
 		}
 	}
-	for pass := 0; pass < 2; pass++ {
+	passes := 2
+	if owner != "" && state.input.Previous == "" {
+		// Exhaust the preferred account (including overflow) before rebuilding
+		// a request without server-side continuation on another capacity account.
+		passes = 4
+	}
+	for pass := 0; pass < passes; pass++ {
+		failover := pass >= 2
 		excluded := make(map[int64]struct{}, len(excludedIDs))
 		for id := range excludedIDs {
 			excluded[id] = struct{}{}
@@ -66,21 +75,34 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 				source, err = resolveCredentialAccount(ctx, s.accountRepo, account)
 			}
 			identity := codexAccountIdentityNamespace(source)
+			if err == nil && (!enabled || !failover && owner != "" && owner != identity) {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				if _, exists := excluded[account.ID]; exists {
+					break
+				}
+				excluded[account.ID] = struct{}{}
+				// A skipped non-owner is not itself a continuation conflict or
+				// evidence that capacity failed on the eligible owner.
+				continue
+			}
 			var lease *codexCapacityLease
 			switch {
 			case err != nil:
-			case !enabled || owner != "" && owner != identity:
-				err = capacityError("session_owner_unavailable", 409, 1)
 			case state != nil && !state.websocket && state.input.Previous != "":
 				err = capacityError("session_continuation_requires_websocket", 400, 1)
 			case state == nil || !state.supported:
 				err = capacityError("session_capacity_requires_responses", 400, 1)
 			default:
-				lease, err = s.codexCapacityRegistry().reserve(identity, policy, state.input, pass == 1, time.Now())
+				lease, err = s.codexCapacityRegistry().reserveWithFailover(identity, policy, state.input, pass%2 == 1, failover, time.Now())
 			}
 			if err == nil {
 				release := lease.release
 				state.stage(account.ID, lease, release)
+				if failover && owner != identity {
+					slog.Info("codex_capacity_failover", "account_id", account.ID)
+				}
 				// The request context owns the lease, including wait-plan and streaming paths.
 				// The concurrency slot keeps its existing, independent lifetime.
 				return selection, decision, nil
@@ -100,6 +122,9 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	}
 	if lastErr == nil {
 		lastErr = ErrNoAvailableAccounts
+	}
+	if owner != "" && state.input.Previous != "" && errors.Is(lastErr, ErrNoAvailableAccounts) {
+		lastErr = capacityError("session_owner_unavailable", 409, 1)
 	}
 	return nil, lastDecision, lastErr
 }

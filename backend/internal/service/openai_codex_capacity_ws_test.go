@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexCapacityWSMultiTurnWire(t *testing.T) {
+func TestCodexCapacityWSMultiTurnWire(t *testing.T) { testCodexCapacityWSMultiTurnWire(t, false) }
+func TestCodexCapacityWSLaterFailureCannotReplayFirstTurn(t *testing.T) {
+	testCodexCapacityWSMultiTurnWire(t, true)
+}
+func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.Enabled = true
 	cfg.Gateway.OpenAIWS.OAuthEnabled = true
@@ -29,6 +34,9 @@ func TestCodexCapacityWSMultiTurnWire(t *testing.T) {
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
 	capture := &openAIWSCaptureConn{events: [][]byte{[]byte(`{"type":"response.completed","response":{"id":"resp_first","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`), []byte(`{"type":"response.completed","response":{"id":"resp_second","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)}}
+	if failLater {
+		capture.events[1] = []byte(`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limit exceeded"}}`)
+	}
 	pool := newOpenAIWSConnPool(cfg)
 	pool.setClientDialerForTest(&openAIWSCaptureDialer{conn: capture})
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: &httpUpstreamRecorder{}, cache: &stubGatewayCache{}, openaiWSResolver: NewOpenAIWSProtocolResolver(cfg), toolCorrector: NewCodexToolCorrector(), openaiWSPool: pool}
@@ -85,13 +93,25 @@ func TestCodexCapacityWSMultiTurnWire(t *testing.T) {
 		body := fmt.Sprintf(`{"type":"response.create","model":"gpt-5.1","store":false,"prompt_cache_key":"child","client_metadata":{"session_id":"child","thread_id":"child","x-codex-turn-metadata":"{\"turn_id\":\"turn-%d\"}"}%s}`, i, previous)
 		require.NoError(t, client.Write(ctx, coderws.MessageText, []byte(body)))
 		_, response, err := client.Read(ctx)
+		if failLater && i == 2 {
+			require.Error(t, err)
+			break
+		}
 		require.NoError(t, err)
 		require.Equal(t, "response.completed", gjson.GetBytes(response, "type").String())
 	}
 	_ = client.Close(coderws.StatusNormalClosure, "done")
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		if failLater {
+			var closeErr *OpenAIWSClientCloseError
+			require.ErrorAs(t, err, &closeErr)
+			require.Equal(t, "session_retry_requires_full_history", closeErr.Reason())
+			var retryErr *UpstreamFailoverError
+			require.False(t, errors.As(err, &retryErr), "handler must not retry its retained first frame")
+		} else {
+			require.NoError(t, err)
+		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
