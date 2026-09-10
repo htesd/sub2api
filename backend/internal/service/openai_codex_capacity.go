@@ -38,6 +38,14 @@ func (a *Account) codexCapacityPolicy() (CodexSessionCapacityPolicy, bool) {
 			p.SubagentFallbackEnabled = v
 		}
 	}
+	if control := a.codexRequestPolicy(); control.Enabled {
+		switch control.CapacityMode {
+		case "queue":
+			p.SubagentFallbackEnabled = false
+		case "subagent":
+			p.SubagentFallbackEnabled = true
+		}
+	}
 	// Invalid configuration fails closed at admission; it must not silently disable limits.
 	return p, true
 }
@@ -47,9 +55,10 @@ func (p CodexSessionCapacityPolicy) valid() bool {
 }
 
 type CodexSessionCapacityError struct {
-	Code       string
-	Status     int
-	RetryAfter int
+	QueueSeconds int // Local admission wait, never an upstream retry.
+	Code         string
+	Status       int
+	RetryAfter   int
 }
 
 func (e *CodexSessionCapacityError) Error() string { return e.Code }
@@ -59,7 +68,7 @@ func AsCodexSessionCapacityError(err error) *CodexSessionCapacityError {
 	return e
 }
 func capacityError(code string, status int, wait int) *CodexSessionCapacityError {
-	return &CodexSessionCapacityError{code, status, max(1, wait)}
+	return &CodexSessionCapacityError{Code: code, Status: status, RetryAfter: max(1, wait)}
 }
 
 type codexCapacityInput struct {

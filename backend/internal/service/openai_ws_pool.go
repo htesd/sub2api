@@ -71,6 +71,7 @@ type openAIWSAcquireRequest struct {
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
 	HeadersFactory  func(context.Context, http.Header) (http.Header, error)
+	BeforeDial      func(context.Context, http.Header) (func(int, http.Header, error), error)
 	ProxyURL        string
 	PreferredConnID string
 	// ForceNewConn: 强制本次获取新连接（避免复用导致连接内续链状态互相污染）。
@@ -81,6 +82,7 @@ type openAIWSAcquireRequest struct {
 
 type openAIWSHandshakeCompatibilityKey struct {
 	betaFeatures        string
+	clientIdentity      string
 	codexInstallationID string
 	sessionIDHyphen     string
 	sessionIDUnderscore string
@@ -1798,7 +1800,17 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
+	var dialDone func(int, http.Header, error)
+	if req.BeforeDial != nil {
+		dialDone, err = req.BeforeDial(ctx, headers)
+		if err != nil {
+			return nil, err
+		}
+	}
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	if dialDone != nil {
+		dialDone(status, handshakeHeaders, err)
+	}
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte
@@ -2035,6 +2047,9 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+	}
+	if p := account.codexRequestPolicy(); p.Enabled && p.IdentityMode == "preserve" {
+		key.clientIdentity = headers.Get("User-Agent") + "\x00" + headers.Get("originator") + "\x00" + headers.Get("version")
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

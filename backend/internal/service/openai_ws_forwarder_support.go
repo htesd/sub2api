@@ -30,7 +30,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	account *Account,
 	stateStore OpenAIWSStateStore,
 	groupID int64,
-) error {
+) (prewarmErr error) {
 	if s == nil {
 		return nil
 	}
@@ -78,6 +78,11 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	prewarmPayload["generate"] = false
 	prewarmPayloadJSON := payloadAsJSONBytes(prewarmPayload)
 
+	done, controlErr := s.beginCodexAttempt(ctx, account, openAIWSPayloadString(payload, "model"), "ws_prewarm", nil)
+	if controlErr != nil {
+		return controlErr
+	}
+	defer func() { done(0, prewarmErr) }()
 	markCodexCapacitySent(ctx)
 	if err := lease.WriteJSONWithContextTimeout(ctx, prewarmPayload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()
@@ -310,6 +315,7 @@ func openAIWSPayloadTransientStatus(payload []byte) int {
 }
 
 func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) string {
+	s.observeCodexStreamFailure(ctx, account, canonicalModel, headers, payload)
 	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 	terminalEvent := normalizeOpenAIWSTerminalEvent(eventType)
 	if terminalEvent != "response.failed" {
@@ -320,6 +326,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx contex
 }
 
 func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) {
+	s.observeCodexStreamFailure(ctx, account, canonicalModel, headers, payload)
 	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 	if eventType != "error" {
 		return
@@ -337,6 +344,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx cont
 // failures and transient failures. Its return value lets stream callers avoid
 // applying the same transition twice for an error/response.failed pair.
 func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffects(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) bool {
+	s.observeCodexStreamFailure(ctx, account, canonicalModel, headers, payload)
 	message := extractOpenAISSEErrorMessage(payload)
 	status := openAIStreamFailureStatus(payload, message)
 	switch status {

@@ -1,3 +1,5 @@
+import CodexRequestPolicyForm from '../CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
@@ -330,6 +332,19 @@ describe('EditAccountModal', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('persists request policy changes and explicit disable for OAuth accounts', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { codex_request_policy: { ...readCodexRequestPolicy(), enabled: true, max_attempts: 4 } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const form = wrapper.getComponent(CodexRequestPolicyForm)
+    expect(form.props('modelValue')).toMatchObject({ enabled: true, max_attempts: 4 })
+    await form.get('input[type="checkbox"]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_request_policy).toMatchObject({ enabled: false, max_attempts: 4 })
+    wrapper.unmount()
+  })
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2028-02-29T12:34:00'))

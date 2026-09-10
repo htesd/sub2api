@@ -3328,6 +3328,11 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
 	}
+	if failoverErr.Reason == service.CodexRequestControlReason {
+		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+		h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "server_error", failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(

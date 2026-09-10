@@ -1,3 +1,5 @@
+import CodexRequestPolicyForm from '../CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
@@ -98,6 +100,21 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it('only writes request policy when explicitly selected for bulk edit', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['oauth'] })
+    await wrapper.get('#bulk-edit-rate-multiplier-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0]?.[1]?.extra?.codex_request_policy).toBeUndefined()
+    await wrapper.get('#bulk-edit-rate-multiplier-enabled').setValue(false)
+    await wrapper.get('[data-testid="bulk-codex-request-policy"]').setValue(true)
+    wrapper.getComponent(CodexRequestPolicyForm).vm.$emit('update:modelValue', { ...readCodexRequestPolicy(), enabled: true, capacity_mode: 'queue' })
+    await nextTick()
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.lastCall?.[1]?.extra?.codex_request_policy).toMatchObject({ enabled: true, capacity_mode: 'queue' })
+    wrapper.unmount()
+  })
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 

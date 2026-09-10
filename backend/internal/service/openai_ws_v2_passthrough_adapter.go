@@ -360,6 +360,7 @@ func (l *openAIWSPassthroughTurnLifecycle) finishTerminalWrite(succeeded bool, o
 type openAIWSPassthroughFirstOutputFrameConn struct {
 	inner             openaiwsv2.FrameConn
 	resolveDeadline   func(payload []byte) openAIWSPassthroughFirstOutputDeadline
+	beforeWrite       func(context.Context, coderws.MessageType, []byte) (func(error), error)
 	activeReadTimeout time.Duration
 
 	mu              sync.Mutex
@@ -456,9 +457,16 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context)
 	}
 }
 
-func (c *openAIWSPassthroughFirstOutputFrameConn) WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) error {
+func (c *openAIWSPassthroughFirstOutputFrameConn) WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) (writeErr error) {
 	if c == nil || c.inner == nil {
 		return errOpenAIWSConnClosed
+	}
+	if c.beforeWrite != nil {
+		done, err := c.beforeWrite(ctx, msgType, payload)
+		if err != nil {
+			return err
+		}
+		defer func() { done(writeErr) }()
 	}
 	generation := uint64(0)
 	if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
@@ -876,7 +884,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			return fmt.Errorf("refresh ws authentication headers: %w", err)
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, s.openAIWSDialTimeout())
+		dialDone, controlErr := s.beginCodexDial(dialCtx, account, headers)
+		if controlErr != nil {
+			cancelDial()
+			return controlErr
+		}
 		upstreamConn, statusCode, handshakeHeaders, err = dialer.Dial(dialCtx, wsURL, headers, proxyURL)
+		dialDone(statusCode, handshakeHeaders, err)
 		cancelDial()
 		if err == nil {
 			break
@@ -921,7 +935,19 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	controlTurnBase := codexControlTurnBase(ctx)
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
+		beforeWrite: func(writeCtx context.Context, kind coderws.MessageType, payload []byte) (func(error), error) {
+			if (kind != coderws.MessageText && kind != coderws.MessageBinary) || gjson.GetBytes(payload, "type").String() != "response.create" {
+				return func(error) {}, nil
+			}
+			_, model := usageMeta.turnModels(initialRequestModel)
+			done, err := s.beginCodexAttempt(writeCtx, account, model, "ws_send", headers)
+			if err != nil {
+				return nil, err
+			}
+			return func(err error) { done(0, err) }, nil
+		},
 		inner:             upstreamFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
 		deadlineChanged:   make(chan struct{}, 1),
@@ -1045,6 +1071,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			}
 			requestModelForThisFrame := ""
 			if isResponseCreate {
+				resetCodexControlTurn(ctx, controlTurnBase+turnNo)
 				requestModelForThisFrame = usageMeta.requestModelForFrame(payload)
 				if requestModelForThisFrame == "" {
 					requestModelForThisFrame = capturedSessionModel
@@ -1241,6 +1268,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnResult.Usage.OutputTokens,
 					turnResult.Usage.CacheReadInputTokens,
 				)
+				s.finishCodexForward(ctx, account, nil, turnResult, nil)
 				if hooks != nil && hooks.AfterTurn != nil {
 					hooks.AfterTurn(turnNo, turnResult, nil)
 				}

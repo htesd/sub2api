@@ -992,6 +992,11 @@
         </div>
       </div>
 
+      <div v-if="allOpenAIOAuthOnly" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="flex items-center gap-2 text-sm"><input v-model="enableCodexRequestPolicy" data-testid="bulk-codex-request-policy" type="checkbox" />{{ t('admin.accounts.openai.requestPolicy.bulkApply') }}</label>
+        <CodexRequestPolicyForm v-if="enableCodexRequestPolicy" v-model="codexRequestPolicy" fingerprint-mode="capacity" />
+      </div>
+
       <!-- Upstream billing auto probe (any API-key platform) -->
       <div v-if="allBillingProbeCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1473,6 +1478,8 @@
 </template>
 
 <script setup lang="ts">
+import CodexRequestPolicyForm from './CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -1708,6 +1715,8 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const enableCodexFingerprintMode = ref(false)
+const codexRequestPolicy = ref(readCodexRequestPolicy())
+const enableCodexRequestPolicy = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
@@ -2110,6 +2119,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_fingerprint_mode = codexFingerprintMode.value
   }
 
+  if (enableCodexRequestPolicy.value && allOpenAIOAuthOnly.value) {
+    ensureExtra().codex_request_policy = { ...codexRequestPolicy.value }
+  }
+
   if (enableOpenAICompactMode.value) {
     const extra = ensureExtra()
     extra.openai_compact_mode = openAICompactMode.value
@@ -2224,6 +2237,7 @@ const handleSubmit = async () => {
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
     enableCodexFingerprintMode.value ||
+    enableCodexRequestPolicy.value ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -2375,6 +2389,8 @@ watch(
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
       enableCodexFingerprintMode.value = false
+      codexRequestPolicy.value = readCodexRequestPolicy()
+      enableCodexRequestPolicy.value = false
       codexFingerprintMode.value = 'off'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false

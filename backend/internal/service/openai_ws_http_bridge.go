@@ -419,7 +419,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	grokCacheIdentity string,
 	turn int,
 	writeClientMessage func([]byte) error,
-) (*OpenAIForwardResult, error) {
+) (forwardResult *OpenAIForwardResult, forwardErr error) {
+	defer func() { s.finishCodexForward(ctx, account, payload, forwardResult, forwardErr) }()
 	if s == nil {
 		return nil, errors.New("service is nil")
 	}
@@ -821,6 +822,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 					)
 				}
 			}
+			s.observeCodexStreamFailure(ctx, account, mappedModel, resp.Header, upstreamMessage)
 			requestScopedCapacity := isOpenAIUpstreamCapacityShedEvent(upstreamMessage)
 			if account.Platform == PlatformGrok && eventType == "error" {
 				// SSE error events do not carry an HTTP status. The local status

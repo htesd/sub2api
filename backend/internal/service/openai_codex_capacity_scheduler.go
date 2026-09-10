@@ -24,11 +24,90 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	var deadline time.Time
+	var queueDecision OpenAIAccountScheduleDecision
+	var queueRetryAfter int
+	queued := false
+	defer func() {
+		if queued {
+			rt := s.codexControls()
+			rt.mu.Lock()
+			rt.waiters--
+			rt.mu.Unlock()
+		}
+	}()
+	for {
+		if queued && !time.Now().Before(deadline) {
+			return nil, queueDecision, capacityError("session_queue_timeout", 429, queueRetryAfter)
+		}
+		selection, decision, err := s.selectAccountWithCapacityAdmissionScan(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+		capacityErr := AsCodexSessionCapacityError(err)
+		if capacityErr == nil || capacityErr.QueueSeconds <= 0 {
+			return selection, decision, err
+		}
+		if !queued {
+			rt := s.codexControls()
+			rt.mu.Lock()
+			if rt.waiters >= 128 {
+				rt.mu.Unlock()
+				return nil, decision, capacityError("session_queue_full", 429, 1)
+			}
+			rt.waiters++
+			rt.mu.Unlock()
+			queued = true
+			deadline = time.Now().Add(time.Duration(capacityErr.QueueSeconds) * time.Second)
+			queueDecision, queueRetryAfter = decision, capacityErr.RetryAfter
+			if r := codexControl(ctx); r != nil {
+				r.mu.Lock()
+				budgetDeadline := r.started.Add(time.Duration(r.policy.RetryWindowSeconds) * time.Second)
+				if r.configured && budgetDeadline.Before(deadline) {
+					deadline = budgetDeadline
+				}
+				r.mu.Unlock()
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, decision, capacityError("session_queue_timeout", 429, capacityErr.RetryAfter)
+		}
+		delay := min(time.Until(deadline), time.Second)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, decision, ctx.Err()
+		case <-timer.C:
+		}
+		if r := codexControl(ctx); r != nil {
+			r.mu.Lock()
+			r.wait += delay
+			r.totalWait += delay
+			r.mu.Unlock()
+		}
+	}
+}
+
+func (s *OpenAIGatewayService) selectAccountWithCapacityAdmissionScan(
+	ctx context.Context,
+	groupID *int64,
+	previousResponseID string,
+	sessionHash string,
+	requestedModel string,
+	excludedIDs map[int64]struct{},
+	requiredTransport OpenAIUpstreamTransport,
+	requiredCapability OpenAIEndpointCapability,
+	requiredImageCapability OpenAIImagesCapability,
+	requireCompact bool,
+	platform string,
+	previousResponseCanMove bool,
+	useUpstreamTokenCost bool,
+) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	state := codexCapacityFromContext(ctx)
 	if state != nil {
 		state.clear()
 	}
 	var lastErr error
+	var queueErr *CodexSessionCapacityError
+	var queueAccount *Account
 	var lastDecision OpenAIAccountScheduleDecision
 	owner := ""
 	if state != nil {
@@ -115,10 +194,23 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			}
 			excluded[account.ID] = struct{}{}
 			lastErr = err
+			if e := AsCodexSessionCapacityError(err); e != nil && e.Code == "session_roots_full" && state != nil && state.input.Previous == "" {
+				p := account.codexRequestPolicy()
+				if p.Enabled && p.CapacityMode == "queue" && p.CapacityWaitSeconds > 0 {
+					queueAccount = account
+					copy := *e
+					copy.QueueSeconds = p.CapacityWaitSeconds
+					queueErr = &copy
+				}
+			}
 		}
 		if state == nil {
 			break
 		}
+	}
+	if queueErr != nil {
+		configureCodexControl(ctx, queueAccount)
+		return nil, lastDecision, queueErr
 	}
 	if lastErr == nil {
 		lastErr = ErrNoAvailableAccounts

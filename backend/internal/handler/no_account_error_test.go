@@ -303,3 +303,13 @@ func TestClassifySelectionFailureError_StillUpgradesNonModelNotFoundFallback(t *
 	require.Equal(t, "rate_limit_error", got.ErrType)
 	require.False(t, got.ModelNotFound)
 }
+
+func TestClassifySelectionFailureError_CapacityProtocolMismatchIsNotTransient(t *testing.T) {
+	fallback := noAccountErrorClassification{Status: 503, ErrType: "api_error", Message: "Service temporarily unavailable"}
+	mismatch := &service.CodexSessionCapacityError{Code: "session_capacity_requires_responses", Status: 400, RetryAfter: 1}
+	got := classifySelectionFailureError(fmt.Errorf("select account: %w", mismatch), fallback)
+	require.Equal(t, 400, got.Status)
+	require.Equal(t, mismatch.Code, got.ErrType)
+	require.Contains(t, got.Message, "/v1/responses")
+	require.Equal(t, fallback, classifySelectionFailureError(&service.CodexSessionCapacityError{Code: "session_roots_full", Status: 429}, fallback))
+}

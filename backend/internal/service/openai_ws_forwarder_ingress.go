@@ -71,6 +71,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	firstClientMessage []byte,
 	hooks *OpenAIWSIngressHooks,
 ) (returnErr error) {
+	controlTurnBase := codexControlTurnBase(ctx)
 	if s == nil {
 		return errors.New("service is nil")
 	}
@@ -603,6 +604,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		var bridgeAccountFailoverInput []json.RawMessage
 		bridgeAccountFailoverInputExists := false
 		for turn := 1; ; turn++ {
+			resetCodexControlTurn(ctx, controlTurnBase+turn)
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
 				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
 					return err
@@ -811,6 +813,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		Account: account,
 		WSURL:   wsURL,
 		Headers: wsHeaders,
+		BeforeDial: func(dialCtx context.Context, headers http.Header) (func(int, http.Header, error), error) {
+			return s.beginCodexDial(dialCtx, account, headers)
+		},
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
@@ -897,6 +902,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return acquireTurnLease(turn, preferred, forcePreferredConn)
 		}
 		if acquireErr != nil {
+			if isCodexControlStop(acquireErr) {
+				return nil, acquireErr
+			}
 			if isOpenAIWSSessionPreempted(ctx) {
 				return nil, errOpenAIWSSessionPreempted
 			}
@@ -972,13 +980,19 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	var rejectedFieldRetryState *openAIResponsesRejectedFieldRetryState
-	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (*OpenAIForwardResult, error) {
+	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (result *OpenAIForwardResult, relayErr error) {
+		defer func() { s.finishCodexForward(ctx, account, payload, result, relayErr) }()
 		responseModelObserver := &upstreamResponseModelObserver{}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
 		turnStart := time.Now()
 		wroteDownstream := false
+		done, controlErr := s.beginCodexAttempt(ctx, account, openAIWSPayloadStringFromRaw(payload, "model"), "ws_send", baseAcquireReq.Headers)
+		if controlErr != nil {
+			return nil, controlErr
+		}
+		defer func() { done(0, relayErr) }()
 		markCodexCapacitySent(ctx)
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
@@ -1488,6 +1502,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return true
 	}
 	for {
+		resetCodexControlTurn(ctx, controlTurnBase+turn)
 		if turn > 1 && !skipBeforeTurn && hooks != nil && hooks.BeforeRequest != nil {
 			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel); err != nil {
 				return err

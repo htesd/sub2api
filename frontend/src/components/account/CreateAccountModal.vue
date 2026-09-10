@@ -3245,6 +3245,8 @@
         </div>
       </div>
 
+      <CodexRequestPolicyForm v-if="form.platform === 'openai' && accountCategory === 'oauth-based'" v-model="codexRequestPolicy" :fingerprint-mode="codexFingerprintMode" />
+
       <!-- OpenAI Compact 能力配置 -->
       <div
         v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
@@ -3815,6 +3817,8 @@
 </template>
 
 <script setup lang="ts">
+import CodexRequestPolicyForm from './CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -4311,6 +4315,7 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
+const codexRequestPolicy = ref(readCodexRequestPolicy())
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
@@ -5229,6 +5234,7 @@ const resetForm = () => {
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
+  codexRequestPolicy.value = readCodexRequestPolicy()
   codexFingerprintMode.value = 'off'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -5331,6 +5337,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   // 收敛是显式 opt-in：off 即默认值，不落键；device/session/full 必须显式写入，
   // 否则管理员的选择会被当成默认而丢失（#5610）。
+  if (accountCategory.value === 'oauth-based') { extra.codex_request_policy = { ...codexRequestPolicy.value } }
   if (codexFingerprintMode.value !== 'off') {
     extra.codex_fingerprint_mode = codexFingerprintMode.value
   } else {

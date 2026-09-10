@@ -619,7 +619,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	if c != nil && c.Request != nil {
 		for key, values := range c.Request.Header {
 			lower := strings.ToLower(strings.TrimSpace(key))
-			if !isOpenAIPassthroughAllowedRequestHeader(lower, allowTimeoutHeaders) {
+			if !isOpenAIPassthroughAllowedRequestHeader(lower, allowTimeoutHeaders) && !codexControlIdentityHeader(account, lower) {
 				continue
 			}
 			for _, v := range values {
@@ -713,6 +713,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// （User-Agent / originator / version 同源自洽），客户端自报身份不会到达上游。
 	if account.UsesOpenAICodexProtocol() {
 		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
+		applyCodexIdentityPolicy(c, account, req.Header)
 	}
 
 	if req.Header.Get("content-type") == "" {
@@ -2040,6 +2041,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			}
 			cyberHit := false
 			if eventType == "response.failed" || eventType == "error" {
+				s.observeCodexStreamFailure(ctx, account, mappedModel, resp.Header, dataBytes)
 				if codexFailureTerminal && eventType == "error" {
 					sawBareError = true
 					bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)

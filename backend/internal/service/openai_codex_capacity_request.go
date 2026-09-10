@@ -22,6 +22,7 @@ type codexCapacityContextKey struct{}
 const codexCapacityGinKey = "codex_capacity_request"
 
 type codexCapacityRequest struct {
+	control          *codexRequestControl
 	mu               sync.Mutex
 	input            codexCapacityInput
 	headers          http.Header
@@ -71,6 +72,11 @@ func WithCodexSessionCapacity(ctx context.Context, c *gin.Context, body []byte) 
 		return ctx
 	}
 	state := parseCodexCapacityInput(c, body)
+	var group int64
+	if key := getAPIKeyFromContext(c); key != nil && key.GroupID != nil {
+		group = *key.GroupID
+	}
+	state.control = newCodexRequestControl(ctx, group)
 	c.Set(codexCapacityGinKey, state)
 	return context.WithValue(ctx, codexCapacityContextKey{}, state)
 }
@@ -461,6 +467,9 @@ func HasCodexSessionCapacity(c *gin.Context) bool {
 }
 func ReleaseCodexSessionCapacity(c *gin.Context) {
 	if r := codexCapacityFromGin(c); r != nil {
+		if r.control != nil {
+			r.control.finish()
+		}
 		r.clear()
 	}
 }

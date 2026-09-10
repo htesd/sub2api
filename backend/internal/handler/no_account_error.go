@@ -42,6 +42,14 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if err == nil {
 		return fallback
 	}
+	// Capacity projection is a Responses capability, not a transient shortage.
+	// Other endpoints must not turn its explicit rejection into a retryable 503.
+	if e := service.AsCodexSessionCapacityError(err); e != nil && e.Code == "session_capacity_requires_responses" {
+		return noAccountErrorClassification{
+			Status: http.StatusBadRequest, ErrType: e.Code,
+			Message: "Session-capacity accounts require /v1/responses; this endpoint needs a compatible account.",
+		}
+	}
 	// A 404 model_not_found fallback is authoritative and must not be downgraded
 	// to a rate-limit verdict. classifyNoAccountError only reaches it through
 	// DiagnoseModelAvailabilityForPlatform, a dedicated database query over

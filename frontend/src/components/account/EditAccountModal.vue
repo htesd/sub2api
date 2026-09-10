@@ -2212,6 +2212,8 @@
         </div>
       </div>
 
+      <CodexRequestPolicyForm v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow" v-model="codexRequestPolicy" :fingerprint-mode="codexFingerprintMode" />
+
       <!-- OpenAI 订阅档位手动覆盖（Plus/Pro/Free），仅 OAuth 非影子账号 -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
@@ -2962,6 +2964,8 @@
 </template>
 
 <script setup lang="ts">
+import CodexRequestPolicyForm from './CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -3431,6 +3435,7 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
+const codexRequestPolicy = ref(readCodexRequestPolicy())
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
@@ -3913,6 +3918,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
+  codexRequestPolicy.value = readCodexRequestPolicy()
   codexFingerprintMode.value = 'off'
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -3966,6 +3972,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         extra?.codex_cli_only_allow_app_server === true
     }
     if (newAccount.type === 'oauth') {
+      codexRequestPolicy.value = readCodexRequestPolicy(extra?.codex_request_policy)
       const fpMode = extra?.codex_fingerprint_mode as string | undefined
       // 缺省/非法值按 off 呈现，与后端 GetCodexFingerprintMode 的 opt-in 语义一致（#5610）
       codexFingerprintMode.value = (['off', 'device', 'session', 'full', 'capacity'].includes(fpMode || '')
@@ -5488,6 +5495,7 @@ const handleSubmit = async () => {
       // 指纹收敛模式：默认 off（不写入）；device/session/full 是显式 opt-in，
       // 必须落键，否则管理员的选择会被后端当作"未设置"而回落到 off（#5610）。
       if (props.account.type === 'oauth') {
+        newExtra.codex_request_policy = { ...codexRequestPolicy.value }
         if (codexFingerprintMode.value !== 'off') {
           newExtra.codex_fingerprint_mode = codexFingerprintMode.value
         } else {

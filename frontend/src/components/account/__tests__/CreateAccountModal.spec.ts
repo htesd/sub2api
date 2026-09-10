@@ -1,3 +1,5 @@
+import CodexRequestPolicyForm from '../CodexRequestPolicyForm.vue'
+import { readCodexRequestPolicy } from '@/utils/codexRequestPolicy'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -214,6 +216,18 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('includes the selected request policy in Codex account import', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    const form = wrapper.getComponent(CodexRequestPolicyForm)
+    form.vm.$emit('update:modelValue', { ...readCodexRequestPolicy(), enabled: true, max_attempts: 4, capacity_mode: 'queue' })
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Codex control import')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.extra?.codex_request_policy).toMatchObject({ enabled: true, max_attempts: 4, capacity_mode: 'queue' })
+    wrapper.unmount()
+  })
   it('sets month and year expiry presets without submitting the account form', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-01-31T12:34:00'))

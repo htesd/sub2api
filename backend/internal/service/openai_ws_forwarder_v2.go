@@ -33,7 +33,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	attempt int,
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
-) (*OpenAIForwardResult, error) {
+) (result *OpenAIForwardResult, forwardErr error) {
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
@@ -208,6 +208,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		Account: account,
 		WSURL:   wsURL,
 		Headers: wsHeaders,
+		BeforeDial: func(dialCtx context.Context, headers http.Header) (func(int, http.Header, error), error) {
+			return s.beginCodexDial(dialCtx, account, headers)
+		},
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
@@ -228,6 +231,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 				return nil, fmt.Errorf("agent identity task recovery failed: %w", recoveryErr)
 			}
 			return nil, &agentIdentityTaskRecoveredError{}
+		}
+		if isCodexControlStop(err) {
+			return nil, err
 		}
 		s.handleOpenAIWSDialTransientFailure(ctx, account, mappedModel, err)
 		dialStatus, dialClass, dialCloseStatus, dialCloseReason, dialRespServer, dialRespVia, dialRespCFRay, dialRespReqID := summarizeOpenAIWSDialError(err)
@@ -341,6 +347,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 
+	done, controlErr := s.beginCodexAttempt(ctx, account, mappedModel, "ws_send", wsHeaders)
+	if controlErr != nil {
+		return nil, controlErr
+	}
+	defer func() { done(0, forwardErr); s.noteCodexOverload(ctx, account, mappedModel, 0, nil, forwardErr) }()
 	markCodexCapacitySent(ctx)
 	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()
@@ -850,7 +861,7 @@ readLoop:
 		clientDisconnected,
 	)
 
-	result := resultWithUsage()
+	result = resultWithUsage()
 	result.ImageCount = imageCounter.Count()
 	result.ImageOutputSizes = imageCounter.Sizes()
 	return result, nil
