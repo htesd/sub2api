@@ -264,7 +264,7 @@ func TestCodexCapacityCancellationKeepsAdmissionUntilForwardReturns(t *testing.T
 	require.Equal(t, 0, l.binding.Leases)
 }
 
-func TestCodexCapacityAtomicCrossAccountOwner(t *testing.T) {
+func TestCodexCapacityConcurrentAccountScopedBindings(t *testing.T) {
 	r := newCodexCapacityRegistry()
 	p := defaultCodexCapacityPolicy()
 	var wg sync.WaitGroup
@@ -273,21 +273,22 @@ func TestCodexCapacityAtomicCrossAccountOwner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := r.reserve(fmt.Sprint(i), p, capacityInput(1, "root", "thread"), false, time.Now())
+			lease, err := r.reserve(fmt.Sprint(i), p, capacityInput(1, "root", "thread"), false, time.Now())
 			if err == nil {
+				lease.sent(time.Now())
 				accepted.Add(1)
 			}
 		}(i)
 	}
 	wg.Wait()
-	require.Equal(t, int32(1), accepted.Load())
+	require.Equal(t, int32(40), accepted.Load())
 	require.NotEmpty(t, r.boundOwner(capacityInput(1, "root", "thread")))
 	parentOwner := r.boundOwner(capacityInput(1, "root", "thread"))
 	native := capacityInput(1, "root", "native")
 	native.Parent = "thread"
 	require.Equal(t, parentOwner, r.boundOwner(native))
 	_, err := r.reserve("foreign", p, native, false, time.Now())
-	require.Equal(t, 409, AsCodexSessionCapacityError(err).Status)
+	require.NoError(t, err)
 }
 func TestCodexCapacityMixedPoolCannotReplayForeignContinuation(t *testing.T) {
 	body := []byte(`{"prompt_cache_key":"foreign","previous_response_id":"resp_known"}`)

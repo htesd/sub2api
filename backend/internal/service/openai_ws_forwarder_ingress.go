@@ -551,6 +551,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	storeDisabled := false
 	refreshIngressRouteState := func(payload openAIWSClientPayload) {
 		sessionHash = s.GenerateSessionHash(c, payload.rawForHash)
+		if lease := capacityLeaseForAccount(c, account); lease != nil && sessionHash != "" {
+			// Cached upstream turn state and sockets belong to a credential,
+			// even when a full-input logical session fails over to another one.
+			sessionHash = codexCapacityNode(lease.identity, lease.key.Key, "ws-state:"+sessionHash)
+		}
 		preferredConnID = ""
 		storeDisabled = s.isOpenAIWSStoreDisabledInRequestRaw(payload.payloadRaw, account)
 		if useHTTPBridge {
@@ -941,6 +946,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		connID := strings.TrimSpace(lease.ConnID())
 		if handshakeTurnState := strings.TrimSpace(lease.HandshakeHeader(openAIWSTurnStateHeader)); handshakeTurnState != "" {
+			noteCodexCapacityTurnState(c, account, handshakeTurnState)
 			turnState = handshakeTurnState
 			if stateStore != nil && sessionHash != "" {
 				stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())

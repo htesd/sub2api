@@ -107,6 +107,14 @@ func (r *codexCapacityRequest) stage(accountID int64, l *codexCapacityLease, rel
 	r.release = release
 	r.accountID = accountID
 	r.restore = make(map[string]string)
+	prior := l.previousIdentity
+	if prior == "" {
+		prior = l.identity
+	}
+	bodyToken, _ := r.originalMetadata[openAICodexTurnStateHeader].(string)
+	for _, token := range []string{r.headers.Get(openAICodexTurnStateHeader), bodyToken} {
+		l.registry.foreignTurnState(r.input.Key, token, l.identity, prior)
+	}
 }
 func capacityLeaseForAccount(c *gin.Context, account *Account) *codexCapacityLease {
 	r := codexCapacityFromGin(c)
@@ -204,6 +212,12 @@ func projectCodexCapacity(c *gin.Context, account *Account, body []byte, h http.
 		if err := json.Unmarshal([]byte(v.Raw), &cm); err != nil {
 			return nil, err
 		}
+	}
+	if token, _ := cm[openAICodexTurnStateHeader].(string); r.lease.registry.foreignTurnState(owner, token, identity, identity) {
+		delete(cm, openAICodexTurnStateHeader)
+	}
+	if h != nil && r.lease.registry.foreignTurnState(owner, h.Get(openAICodexTurnStateHeader), identity, identity) {
+		h.Del(openAICodexTurnStateHeader)
 	}
 	turn := map[string]any{}
 	if len(body) == 0 && h != nil {

@@ -95,7 +95,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			case state == nil || !state.supported:
 				err = capacityError("session_capacity_requires_responses", 400, 1)
 			default:
-				lease, err = s.codexCapacityRegistry().reserveWithFailover(identity, policy, state.input, pass%2 == 1, failover, time.Now())
+				lease, err = s.codexCapacityRegistry().reserve(identity, policy, state.input, pass%2 == 1, time.Now())
 			}
 			if err == nil {
 				release := lease.release

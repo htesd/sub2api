@@ -38,9 +38,10 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 		capture.events[1] = []byte(`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limit exceeded"}}`)
 	}
 	pool := newOpenAIWSConnPool(cfg)
-	pool.setClientDialerForTest(&openAIWSCaptureDialer{conn: capture})
+	dialer := &openAIWSCaptureDialer{conn: capture}
+	pool.setClientDialerForTest(dialer)
 	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: &httpUpstreamRecorder{}, cache: &stubGatewayCache{}, openaiWSResolver: NewOpenAIWSProtocolResolver(cfg), toolCorrector: NewCodexToolCorrector(), openaiWSPool: pool}
-	account := &Account{ID: 114, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"chatgpt_account_id": "wire-account"}, Extra: map[string]any{"codex_fingerprint_mode": "capacity", "codex_fingerprint_seed": "00000000-0000-4000-8000-000000000001", "responses_websockets_v2_enabled": true, "openai_oauth_responses_websockets_v2_mode": "passthrough"}}
+	account := &Account{ID: 114, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"chatgpt_account_id": "wire-account"}, Extra: map[string]any{"codex_fingerprint_mode": "capacity", "codex_fingerprint_seed": "00000000-0000-4000-8000-000000000001", "responses_websockets_v2_enabled": true, "openai_oauth_responses_websockets_v2_mode": "ctx_pool"}}
 	registry := svc.codexCapacityRegistry()
 	identity := codexAccountIdentityNamespace(account)
 	policy := defaultCodexCapacityPolicy()
@@ -66,7 +67,8 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 		}
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = r.Clone(ctx)
-		c.Set("api_key", &APIKey{ID: 1})
+		groupID := int64(1)
+		c.Set("api_key", &APIKey{ID: 1, GroupID: &groupID})
 		SetOpenAIClientTransport(c, OpenAIClientTransportWS)
 		ctx = WithCodexSessionCapacity(ctx, c, first)
 		defer ReleaseCodexSessionCapacity(c)
@@ -77,6 +79,18 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 			return
 		}
 		state.stage(account.ID, lease, lease.release)
+		preemptCtx, cleanup, armed := svc.BeginOpenAIWSIngressSessionPreemption(ctx, c, account, first)
+		cleanup()
+		if armed || preemptCtx.Err() != nil {
+			done <- fmt.Errorf("capacity must not arm shared session preemption")
+			return
+		}
+		// Neither a legacy unscoped cache entry nor another credential's
+		// scoped entry may supply this account's handshake routing state.
+		sessionHash := svc.GenerateSessionHash(c, first)
+		store := svc.getOpenAIWSStateStore()
+		store.BindSessionTurnState(1, sessionHash, "foreign-unscoped-token", time.Minute)
+		store.BindSessionTurnState(1, codexCapacityNode("other-account", 1, "ws-state:"+sessionHash), "foreign-scoped-token", time.Minute)
 		done <- svc.ProxyResponsesWebSocketFromClient(ctx, c, conn, account, "test-token", first, nil)
 	}))
 	defer server.Close()
@@ -116,6 +130,7 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 		t.Fatal(ctx.Err())
 	}
 	require.Len(t, capture.writes, 2)
+	require.Empty(t, dialer.lastHeaders.Get(openAICodexTurnStateHeader))
 	for i, raw := range capture.writes {
 		body := payloadAsJSONBytes(raw)
 		require.Equal(t, host.Assignment.SessionID, gjson.GetBytes(body, "prompt_cache_key").String())

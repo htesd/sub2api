@@ -91,12 +91,14 @@ type codexCapacityRoot struct {
 type codexCapacityAccount struct {
 	Roots       map[string]codexCapacityRoot
 	Bindings    map[codexCapacityBindingKey]*codexCapacityBinding
-	ActiveRoots map[string]int
 	NewChildren []time.Time
 }
 type codexCapacityRegistry struct {
-	mu       sync.Mutex
-	accounts map[string]*codexCapacityAccount
+	mu         sync.Mutex
+	accounts   map[string]*codexCapacityAccount
+	turnOwners map[[32]byte]string
+	turnOrder  [][32]byte
+	turnNext   int
 }
 
 const codexCapacityRetention = 24 * time.Hour
@@ -116,12 +118,12 @@ func codexCapacityNode(account string, key int64, node string) string {
 }
 func (a *codexCapacityAccount) prune(now time.Time) {
 	for k, b := range a.Bindings {
-		if b.Leases == 0 && a.ActiveRoots[b.Assignment.SessionID] == 0 && (b.LastSent.IsZero() || now.Sub(b.LastSent) >= codexCapacityRetention) {
+		if b.Leases == 0 && (b.LastSent.IsZero() || now.Sub(b.LastSent) >= codexCapacityRetention) {
 			delete(a.Bindings, k)
 		}
 	}
 	for k, r := range a.Roots {
-		if a.ActiveRoots[k] == 0 && now.Sub(r.LastSent) >= codexCapacityRetention {
+		if now.Sub(r.LastSent) >= codexCapacityRetention {
 			delete(a.Roots, k)
 		}
 	}
@@ -243,36 +245,20 @@ func (a *codexCapacityAccount) plan(identity string, p CodexSessionCapacityPolic
 }
 
 type codexCapacityLease struct {
-	registry   *codexCapacityRegistry
-	identity   string
-	key        codexCapacityBindingKey
-	binding    *codexCapacityBinding
-	Assignment codexCapacityAssignment
-	once       sync.Once
-	released   bool
+	registry         *codexCapacityRegistry
+	identity         string
+	previousIdentity string
+	key              codexCapacityBindingKey
+	binding          *codexCapacityBinding
+	Assignment       codexCapacityAssignment
+	once             sync.Once
+	released         bool
 }
 
 func (r *codexCapacityRegistry) reserve(identity string, p CodexSessionCapacityPolicy, in codexCapacityInput, overflow bool, now time.Time) (*codexCapacityLease, error) {
-	return r.reserveWithFailover(identity, p, in, overflow, false, now)
-}
-
-// Full-input requests may fail over after exhausting the preferred account.
-// Keep historical bindings for response ownership and exposure accounting; never
-// move a previous_response_id or split an actively leased logical family.
-func (r *codexCapacityRegistry) reserveWithFailover(identity string, p CodexSessionCapacityPolicy, in codexCapacityInput, overflow, failover bool, now time.Time) (*codexCapacityLease, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if owner := r.activeOwnerLocked(in); owner != "" && owner != identity {
-		if failover {
-			return nil, capacityError("session_in_use", 429, 1)
-		}
-		return nil, capacityError("session_owner_unavailable", 409, 1)
-	}
-	if in.Previous == "" && !failover {
-		if owner := r.bindingOwnerLocked(in, now); owner != "" && owner != identity {
-			return nil, capacityError("session_owner_unavailable", 409, 1)
-		}
-	}
+	previousIdentity := r.bindingOwnerLocked(in, now)
 	a := r.accounts[identity]
 	if a == nil {
 		a = &codexCapacityAccount{Roots: make(map[string]codexCapacityRoot), Bindings: make(map[codexCapacityBindingKey]*codexCapacityBinding)}
@@ -290,11 +276,7 @@ func (r *codexCapacityRegistry) reserveWithFailover(identity string, p CodexSess
 		a.Bindings[key] = b
 	}
 	b.Leases++
-	if a.ActiveRoots == nil {
-		a.ActiveRoots = make(map[string]int)
-	}
-	a.ActiveRoots[b.Assignment.SessionID]++
-	return &codexCapacityLease{registry: r, identity: identity, key: key, binding: b, Assignment: out}, nil
+	return &codexCapacityLease{registry: r, identity: identity, previousIdentity: previousIdentity, key: key, binding: b, Assignment: out}, nil
 }
 func (l *codexCapacityLease) release() {
 	if l == nil {
@@ -305,12 +287,7 @@ func (l *codexCapacityLease) release() {
 		defer l.registry.mu.Unlock()
 		l.released = true
 		l.binding.Leases--
-		a := l.registry.accounts[l.identity]
-		a.ActiveRoots[l.Assignment.SessionID]--
-		if a.ActiveRoots[l.Assignment.SessionID] == 0 {
-			delete(a.ActiveRoots, l.Assignment.SessionID)
-		}
-		if l.binding.Leases == 0 && l.binding.LastSent.IsZero() && a.ActiveRoots[l.Assignment.SessionID] == 0 {
+		if l.binding.Leases == 0 && l.binding.LastSent.IsZero() {
 			delete(l.registry.accounts[l.identity].Bindings, l.key)
 		}
 	})
@@ -384,9 +361,6 @@ func (r *codexCapacityRegistry) responseOwner(in codexCapacityInput, now time.Ti
 }
 
 func (r *codexCapacityRegistry) bindingOwnerLocked(in codexCapacityInput, now time.Time) string {
-	if owner := r.activeOwnerLocked(in); owner != "" {
-		return owner
-	}
 	for _, thread := range []string{in.Thread, in.Parent, in.Root} {
 		if thread == "" {
 			continue
@@ -407,18 +381,6 @@ func (r *codexCapacityRegistry) bindingOwnerLocked(in codexCapacityInput, now ti
 	return ""
 }
 
-func (r *codexCapacityRegistry) activeOwnerLocked(in codexCapacityInput) string {
-	for id, a := range r.accounts {
-		// Assignments already resolve transitive parents and synthetic hosts.
-		// Index leases by that mapped root, rather than scan retained history.
-		for _, node := range []string{in.Thread, in.Parent, in.Root} {
-			if b := a.Bindings[codexCapacityBindingKey{in.Key, node}]; node != "" && b != nil && a.ActiveRoots[b.Assignment.SessionID] > 0 {
-				return id
-			}
-		}
-	}
-	return ""
-}
 func (r *codexCapacityRegistry) boundOwner(in codexCapacityInput) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

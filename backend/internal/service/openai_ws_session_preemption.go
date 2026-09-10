@@ -53,6 +53,12 @@ func (s *OpenAIGatewayService) BeginOpenAIWSIngressSessionPreemption(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if HasCodexSessionCapacity(c) {
+		// Each admitted capacity connection owns its account/thread lease.
+		// Shared client affinity must not cancel another independent socket,
+		// including one kept alive on the previous account during failover.
+		return ctx, func() {}, false
+	}
 	if armed, _ := ctx.Value(openAIWSSessionPreemptContextKey{}).(bool); armed {
 		return ctx, func() {}, true
 	}

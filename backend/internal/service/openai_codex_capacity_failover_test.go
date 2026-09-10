@@ -78,39 +78,6 @@ func TestCodexCapacitySchedulerFailoverAfterExposure(t *testing.T) {
 	}
 }
 
-func TestCodexCapacityFailoverPinsActiveFamily(t *testing.T) {
-	registry := newCodexCapacityRegistry()
-	policy := defaultCodexCapacityPolicy()
-	now := time.Now()
-	root := capacityInput(1, "session", "parent")
-	old, err := registry.reserve("old", policy, root, false, now)
-	require.NoError(t, err)
-	old.sent(now)
-	old.release()
-	child := capacityInput(1, "session", "child")
-	child.Parent = "parent"
-	active, err := registry.reserve("old", policy, child, false, now)
-	require.NoError(t, err)
-	active.sent(now)
-	_, err = registry.reserveWithFailover("new", policy, root, false, true, now)
-	require.Equal(t, "session_in_use", AsCodexSessionCapacityError(err).Code)
-	require.Equal(t, 429, AsCodexSessionCapacityError(err).Status)
-	active.release()
-	next, err := registry.reserveWithFailover("new", policy, root, false, true, now.Add(time.Second))
-	require.NoError(t, err)
-	next.sent(now.Add(time.Second))
-	// The old child binding must not override the actively migrated parent.
-	require.Equal(t, "new", registry.boundOwner(child))
-	_, err = registry.reserveWithFailover("old", policy, child, false, true, now)
-	require.Error(t, err)
-	next.release()
-	// A separate API key is independent even when clients reuse logical IDs.
-	root.Key = 2
-	independent, err := registry.reserveWithFailover("other", policy, root, false, true, now)
-	require.NoError(t, err)
-	independent.release()
-}
-
 func TestCodexCapacityFailoverStillEnforcesTargetCapacityAndContinuation(t *testing.T) {
 	registry := newCodexCapacityRegistry()
 	policy := defaultCodexCapacityPolicy()
@@ -126,52 +93,40 @@ func TestCodexCapacityFailoverStillEnforcesTargetCapacityAndContinuation(t *test
 	require.NoError(t, err)
 	host.sent(now)
 	host.release()
-	_, err = registry.reserveWithFailover("new", policy, in, false, true, now)
+	_, err = registry.reserve("new", policy, in, false, now)
 	require.Equal(t, "session_roots_full", AsCodexSessionCapacityError(err).Code)
-	moved, err := registry.reserveWithFailover("new", policy, in, true, true, now)
+	moved, err := registry.reserve("new", policy, in, true, now)
 	require.NoError(t, err)
 	require.True(t, moved.Assignment.Synthetic)
 	require.Equal(t, host.Assignment.ThreadID, moved.Assignment.ParentThreadID)
 	moved.sent(now)
 	moved.release()
 	in.Previous = "resp_old"
-	_, err = registry.reserveWithFailover("new", policy, in, true, true, now)
+	_, err = registry.reserve("new", policy, in, true, now)
 	require.Equal(t, "session_continuation_unbound", AsCodexSessionCapacityError(err).Code)
 	in.Key = 2
 	_, err = registry.continuationOwner(in, now)
 	require.Equal(t, "session_continuation_owner_mismatch", AsCodexSessionCapacityError(err).Code)
 }
 
-func TestCodexCapacityFailoverPinsTransitiveFamily(t *testing.T) {
-	for _, liveThread := range []int{0, 2} {
-		t.Run([]string{"parent_active", "unused", "grandchild_active"}[liveThread], func(t *testing.T) {
-			registry := newCodexCapacityRegistry()
-			policy := defaultCodexCapacityPolicy()
-			now := time.Now()
-			inputs := []codexCapacityInput{capacityInput(1, "P", "P"), capacityInput(1, "C", "C"), capacityInput(1, "G", "G")}
-			inputs[1].Parent = "P"
-			inputs[2].Parent = "C"
-			leases := make([]*codexCapacityLease, 3)
-			for i, in := range inputs {
-				var err error
-				leases[i], err = registry.reserve("old", policy, in, false, now)
-				require.NoError(t, err)
-				leases[i].sent(now)
-			}
-			for i, l := range leases {
-				if i != liveThread {
-					l.release()
-				}
-			}
-			target := inputs[2-liveThread]
-			// An active root retains its ancestral mappings beyond the idle TTL.
-			registry.accounts["old"].prune(now.Add(25 * time.Hour))
-			_, err := registry.reserveWithFailover("new", policy, target, false, true, now.Add(25*time.Hour))
-			require.Equal(t, "session_in_use", AsCodexSessionCapacityError(err).Code)
-			leases[liveThread].release()
-			moved, err := registry.reserveWithFailover("new", policy, target, false, true, now.Add(25*time.Hour))
-			require.NoError(t, err)
-			moved.release()
-		})
-	}
+func TestCodexCapacityActiveLeasePinsAccountCapacityNotOtherAccounts(t *testing.T) {
+	registry := newCodexCapacityRegistry()
+	policy := defaultCodexCapacityPolicy()
+	policy.MaxRootSessions = 1
+	now := time.Now()
+	in := capacityInput(1, "root", "root")
+	first, err := registry.reserve("old", policy, in, false, now)
+	require.NoError(t, err)
+	first.sent(now)
+	second, err := registry.reserve("new", policy, in, false, now)
+	require.NoError(t, err)
+	require.NotEqual(t, first.Assignment.ThreadID, second.Assignment.ThreadID)
+	second.sent(now)
+	second.release()
+	_, err = registry.reserve("old", policy, capacityInput(1, "other", "other"), false, now.Add(time.Hour))
+	require.Equal(t, "session_roots_full", AsCodexSessionCapacityError(err).Code)
+	first.release()
+	fresh, err := registry.reserve("old", policy, capacityInput(1, "other", "other"), false, now.Add(time.Hour))
+	require.NoError(t, err)
+	fresh.release()
 }
