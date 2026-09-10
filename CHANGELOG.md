@@ -1,4 +1,4 @@
-## [Unreleased] - 2026-09-10
+## [0.2.4-session-capacity.3] - 2026-09-11
 ### Features
 - 新增默认关闭的 Codex 请求诊断、共享重试预算与过载冷却、客户端身份对照、容量排队基线，以及 attestation 状态诊断。
 - 创建、编辑、批量编辑支持保存独立策略，开启策略后普通 HTTP 转发补齐现代 Codex 会话头的隔离传递。
@@ -9,7 +9,7 @@
 - 先建立安全的可观测性，再限制重试放大和做单变量对照；不把代理层变化当作解除上游限制的保证。
 ### Notes & Caveats
 - 仅 Responses 系列 OAuth 路径；默认关闭。状态为进程内，WS 每个新 turn 重置预算，外部插件内部重试不包含在计数中。
-- 未切换生产入口。配置和日志解释见 docs/codex-request-control.md。
+- 已完成隔离验证及首轮生产部署；请求控制仍需显式开启。配置和日志解释见 docs/codex-request-control.md。
 
 ## [0.2.4-session-capacity.2] - 2026-09-10
 ### Fixes
