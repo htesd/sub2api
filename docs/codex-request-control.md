@@ -30,3 +30,13 @@
 生产日志确认大量 Chat Completions 选号失败的内部原因是 `session_capacity_requires_responses`，旧入口将其泛化为 503。本补丁将这个明确的协议不兼容分类为 400 并说明需 Responses 或兼容账号，避免把它误报成可重试的上游过载。此修复不增加 Chat Completions 对容量模式的支持。
 
 如果同模型当前可选账号均为 capacity，Chat Completions 需要改用 Responses，或由管理员提供至少一个该分组/模型可用的非 capacity 账号；普通设备收敛可以作为兼容对照。缺少稳定 session/thread 或 prompt_cache_key 的 Responses 请求仍会返回 `session_identity_required`；不能通过每次随机造 session 来掩盖客户端身份缺失。
+
+## 2026-09-11：会话身份与重试边界
+
+`session_identity_required` 是本地准入的 400；容量校验失败的候选没有发送上游请求。错误消息现在说明客户端需提供稳定会话身份，400 不再附带 HTTP `Retry-After` 或 WS `retry_after`。原有 429/409/503 的等待提示保留。
+
+客户端可在每段对话开始时生成一个 UUID，通过 `session-id` 请求头发送，同一对话后续轮次和重试复用它。`thread-id` 缺省时继承 session；只发送 `thread-id` 不够。也支持原有的 `client_metadata.session_id`、turn metadata 的 `session_id`、`session_id` 请求头及 `prompt_cache_key` 回退。不同对话应使用不同身份，不能使用每次请求的随机 ID 或整个 API key 共用的常量。已提供上述身份仍报错时，需要管理员检查网关入口透传和内部身份解析。
+
+设备收敛不会自动生成客户端会话身份。缺少身份时，调度器仍可选择该分组/模型授权且可用的非 capacity 兼容账号；不会自动关闭某个 capacity 账号的容量限制。
+
+原有换号逻辑是失败后依次尝试账号，各层重试有自己的上限。统一预算限制实际传输操作，不限制本地候选扫描次数。回归测试从真实 Responses handler 进入：模拟账号 1 上游返回 520，预算为 1 时账号 2 不会收到请求，即使账号 2 关闭策略或将预算提高至 20。关闭新策略的对照仍可尝试账号 1、2。客户端重新发起请求仍会获得独立预算。

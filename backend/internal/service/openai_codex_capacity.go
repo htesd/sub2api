@@ -62,13 +62,24 @@ type CodexSessionCapacityError struct {
 }
 
 func (e *CodexSessionCapacityError) Error() string { return e.Code }
+func (e *CodexSessionCapacityError) ClientMessage() string {
+	if e.Code == "session_identity_required" {
+		return "Session-capacity routing could not resolve a conversation identity. Send a stable session-id header, client_metadata.session_id, or prompt_cache_key; reuse it across turns and retries of the same conversation. If already supplied, contact the gateway administrator."
+	}
+	return e.Code
+}
 func AsCodexSessionCapacityError(err error) *CodexSessionCapacityError {
 	var e *CodexSessionCapacityError
 	errors.As(err, &e)
 	return e
 }
 func capacityError(code string, status int, wait int) *CodexSessionCapacityError {
-	return &CodexSessionCapacityError{Code: code, Status: status, RetryAfter: max(1, wait)}
+	wait = max(1, wait)
+	// Invalid requests require a client change; waiting cannot make them valid.
+	if status == 400 {
+		wait = 0
+	}
+	return &CodexSessionCapacityError{Code: code, Status: status, RetryAfter: wait}
 }
 
 type codexCapacityInput struct {

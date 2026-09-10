@@ -666,8 +666,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		)
 		if err != nil {
 			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
-				c.Header("Retry-After", strconv.Itoa(capacityErr.RetryAfter))
-				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.Code, streamStarted)
+				if capacityErr.RetryAfter > 0 {
+					c.Header("Retry-After", strconv.Itoa(capacityErr.RetryAfter))
+				}
+				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.ClientMessage(), streamStarted)
 				return
 			}
 			if failoverClientGone(c) {
@@ -2621,7 +2623,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		)
 		if err != nil {
 			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
-				event, _ := json.Marshal(gin.H{"type": "error", "status": capacityErr.Status, "error": gin.H{"type": "session_capacity_error", "code": capacityErr.Code, "message": capacityErr.Code}, "retry_after": capacityErr.RetryAfter})
+				payload := gin.H{"type": "error", "status": capacityErr.Status, "error": gin.H{"type": "session_capacity_error", "code": capacityErr.Code, "message": capacityErr.ClientMessage()}}
+				if capacityErr.RetryAfter > 0 {
+					payload["retry_after"] = capacityErr.RetryAfter
+				}
+				event, _ := json.Marshal(payload)
 				writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 				_ = wsConn.Write(writeCtx, coderws.MessageText, event)
 				cancel()

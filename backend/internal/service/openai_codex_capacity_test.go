@@ -144,6 +144,23 @@ func TestCodexCapacityContinuationOwnership(t *testing.T) {
 	_, err = r.reserve("account", p, in, true, now.Add(25*time.Hour))
 	require.Error(t, err)
 }
+func TestCodexCapacityRetryHints(t *testing.T) {
+	for _, status := range []int{400, 409, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			for _, wait := range []int{0, 17} {
+				err := capacityError("session_test", status, wait)
+				require.Equal(t, status, err.Status)
+				require.Equal(t, "session_test", err.Error())
+				if status == 400 {
+					require.Zero(t, err.RetryAfter)
+				} else {
+					require.Equal(t, max(1, wait), err.RetryAfter)
+				}
+			}
+		})
+	}
+}
+
 func capacityContext(t *testing.T, body []byte) (*gin.Context, *Account, *OpenAIGatewayService) {
 	t.Helper()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

@@ -5,15 +5,19 @@ package handler
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -49,7 +53,7 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 	return append([]int64(nil), u.accountIDs...)
 }
 
-func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
+func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream, configure ...func([]service.Account, *config.Config)) *OpenAIGatewayHandler {
 	t.Helper()
 	accounts := []service.Account{
 		{
@@ -75,8 +79,11 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 			Credentials: map[string]any{"access_token": "token-2"},
 		},
 	}
-	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+	for _, apply := range configure {
+		apply(accounts, cfg)
+	}
+	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -191,4 +198,103 @@ func TestOpenAIGatewayHandlerResponses_FailoverContinuesForConnectedClient(t *te
 	require.Equal(t, []int64{1, 2}, upstream.calls(), "在线客户端应正常切换账号")
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+}
+
+func TestOpenAIGatewayHandlerResponses_CapacityIdentityAdmission(t *testing.T) {
+	for _, scenario := range []string{"missing", "thread_only", "stable_session", "compatible_device"} {
+		t.Run(scenario, func(t *testing.T) {
+			upstream := &openAIResponsesFailoverCancelUpstream{}
+			handler := newOpenAIResponsesFailoverTestHandler(t, upstream, func(accounts []service.Account, _ *config.Config) {
+				for i := range accounts {
+					accounts[i].Credentials["chatgpt_account_id"] = fmt.Sprint("upstream-account-", i)
+					accounts[i].Extra = map[string]any{"codex_fingerprint_mode": "capacity"}
+				}
+				if scenario == "compatible_device" {
+					accounts[1].Extra["codex_fingerprint_mode"] = "device"
+				}
+			})
+			c, rec := newOpenAIResponsesFailoverTestContext(t, nil)
+			switch scenario {
+			case "thread_only":
+				c.Request.Header.Set("thread-id", "conversation-1")
+			case "stable_session":
+				c.Request.Header.Set("session-id", "conversation-1")
+			}
+			handler.Responses(c)
+			switch scenario {
+			case "missing", "thread_only":
+				require.Equal(t, http.StatusBadRequest, rec.Code)
+				require.Equal(t, "session_identity_required", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+				require.Contains(t, gjson.GetBytes(rec.Body.Bytes(), "error.message").String(), "reuse it across turns and retries")
+				require.Empty(t, rec.Header().Get("Retry-After"))
+				require.Empty(t, upstream.calls(), "本地身份校验失败不应触达任何上游账号")
+			case "stable_session":
+				require.Equal(t, []int64{1, 2}, upstream.calls(), "一个 session-id 即可准入；模拟上游 520 仍允许普通会话换号")
+			case "compatible_device":
+				require.Equal(t, []int64{2}, upstream.calls(), "缺少 session 身份仍可使用授权的 device 兼容账号")
+			}
+		})
+	}
+}
+
+func TestOpenAIGatewayHandlerResponses_CodexBudgetStopsBeforeNextAccount(t *testing.T) {
+	for _, nextEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprint("next_enabled_", nextEnabled), func(t *testing.T) {
+			upstream := &openAIResponsesFailoverCancelUpstream{}
+			handler := newOpenAIResponsesFailoverTestHandler(t, upstream, func(accounts []service.Account, _ *config.Config) {
+				for i := range accounts {
+					accounts[i].Credentials["chatgpt_account_id"] = fmt.Sprint("upstream-account-", i)
+					accounts[i].Extra = map[string]any{
+						"codex_fingerprint_mode": "capacity",
+						"codex_request_policy":   map[string]any{"enabled": nextEnabled, "max_attempts": 20},
+					}
+				}
+				accounts[0].Extra["codex_request_policy"] = map[string]any{"enabled": true, "max_attempts": 1}
+			})
+			c, rec := newOpenAIResponsesFailoverTestContext(t, nil)
+			c.Request.Header.Set("session-id", "conversation-1")
+			handler.Responses(c)
+			require.Equal(t, []int64{1}, upstream.calls(), "第二个账号关闭策略或放宽预算都不能重置本次请求上限")
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			require.Contains(t, rec.Body.String(), "codex_retry_budget_exhausted")
+			require.Equal(t, "1", rec.Header().Get("Retry-After"))
+		})
+	}
+}
+
+func TestOpenAIGatewayHandlerResponsesWebSocket_CapacityIdentityAdmission(t *testing.T) {
+	upstream := &openAIResponsesFailoverCancelUpstream{}
+	handler := newOpenAIResponsesFailoverTestHandler(t, upstream, func(accounts []service.Account, cfg *config.Config) {
+		cfg.Gateway.OpenAIWS.Enabled = true
+		cfg.Gateway.OpenAIWS.OAuthEnabled = true
+		cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+		cfg.Gateway.OpenAIWS.ModeRouterV2Enabled = true
+		for i := range accounts {
+			accounts[i].Credentials["chatgpt_account_id"] = fmt.Sprint("upstream-account-", i)
+			accounts[i].Extra = map[string]any{"codex_fingerprint_mode": "capacity", "responses_websockets_v2_enabled": true, "openai_oauth_responses_websockets_v2_mode": "ctx_pool"}
+		}
+	})
+	template, _ := newOpenAIResponsesFailoverTestContext(t, nil)
+	router := gin.New()
+	router.GET("/v1/responses", func(c *gin.Context) {
+		for key, value := range template.Keys {
+			c.Set(key, value)
+		}
+		handler.ResponsesWebSocket(c)
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+	require.NoError(t, err)
+	defer conn.CloseNow()
+	require.NoError(t, conn.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","input":"hello"}`)))
+	_, event, err := conn.Read(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(400), gjson.GetBytes(event, "status").Int())
+	require.Equal(t, "session_identity_required", gjson.GetBytes(event, "error.code").String())
+	require.Contains(t, gjson.GetBytes(event, "error.message").String(), "reuse it across turns and retries")
+	require.False(t, gjson.GetBytes(event, "retry_after").Exists())
+	require.Empty(t, upstream.calls())
 }
