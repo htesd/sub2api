@@ -1,5 +1,7 @@
 # Codex 请求诊断与请求控制（capacity.3）
 
+**生产试部署已回退。** 2026-09-11 用户反馈大量 `503 codex_retry_budget_exhausted`，已恢复 capacity.2 和此前的请求控制配置。该错误同时覆盖次数用尽和时间窗口到期；观察中出现过 attempt 计数为 0 的停止事件。再次上线前需重新评估等待耗时与重试预算的边界，短请求成功不足以证明真实流量下有效。
+
 在账号创建、编辑或批量编辑中开启「Codex 请求控制」。默认关闭，只针对 OpenAI OAuth 的 Responses、compact 和 WS Responses；不会自动更改现有账号配置。实现优先级如下。
 
 1. **诊断**：关联请求、WS turn、账号和真实传输操作。记录改写过的头名称、状态分类、耗时和 token 用量，不记录原始 UA、会话标识、凭据或 attestation token。`codex request context` 将现有日志上下文连接到 `route_request_id`；按该 ID 查 `codex_upstream_attempt/result`、`codex_forward_result`、`codex_request_summary`。HTTP 收到响应头不等于生成成功，以 forward result 为准。

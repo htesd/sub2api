@@ -9,7 +9,7 @@
 - 先建立安全的可观测性，再限制重试放大和做单变量对照；不把代理层变化当作解除上游限制的保证。
 ### Notes & Caveats
 - 仅 Responses 系列 OAuth 路径；默认关闭。状态为进程内，WS 每个新 turn 重置预算，外部插件内部重试不包含在计数中。
-- 已完成隔离验证及首轮生产部署；请求控制仍需显式开启。配置和日志解释见 docs/codex-request-control.md。
+- 首轮生产试部署后，用户反馈大量 `codex_retry_budget_exhausted`，已回退 capacity.2 并关闭本次开启的控制。默认时间窗口对实际流量的影响仍需重新评估，不应依据短请求成功判断整体效果。配置和日志解释见 docs/codex-request-control.md。
 
 ## [0.2.4-session-capacity.2] - 2026-09-10
 ### Fixes
