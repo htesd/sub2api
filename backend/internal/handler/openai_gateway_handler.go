@@ -638,7 +638,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
 	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
-	c.Request = c.Request.WithContext(pricingCtx)
+	c.Request = c.Request.WithContext(service.WithCodexSessionCapacity(pricingCtx, c, body))
+	defer service.ReleaseCodexSessionCapacity(c)
 
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
@@ -664,6 +665,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
+				c.Header("Retry-After", strconv.Itoa(capacityErr.RetryAfter))
+				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.Code, streamStarted)
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
 				return
@@ -2591,7 +2597,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 继续按建连时刻的谷价计费。生图意图只影响能力路由与图片计费，不关门。
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
 	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
-	ctx = wsPricingCtx
+	ctx = service.WithCodexSessionCapacity(wsPricingCtx, c, firstMessage)
+	defer service.ReleaseCodexSessionCapacity(c)
 
 	for {
 		if ctx.Err() != nil {
@@ -2613,6 +2620,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
+				event, _ := json.Marshal(gin.H{"type": "error", "status": capacityErr.Status, "error": gin.H{"type": "session_capacity_error", "code": capacityErr.Code, "message": capacityErr.Code}, "retry_after": capacityErr.RetryAfter})
+				writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				_ = wsConn.Write(writeCtx, coderws.MessageText, event)
+				cancel()
+				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, capacityErr.Code)
+				return
+			}
 			reqLog.Warn("openai.websocket_account_select_failed",
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
@@ -2982,7 +2997,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// 说明该会话链不属于本次调度到的账号，原样转发会触发上游会话链鉴权失败（“鉴权失败，请检查 API Key”）。
 		// 故剥离首包里的 previous_response_id，改用首包内 input 重建上下文；带 function_call_output 的
 		// 工具续链无法重建，保持原样。仅作用于首轮首包，后续 turn 的续链由 WS 转发层既有逻辑处理。
-		if previousResponseID != "" && !scheduleDecision.StickyPreviousHit && previousResponseCanMove {
+		if previousResponseID != "" && !scheduleDecision.StickyPreviousHit && previousResponseCanMove && !service.HasCodexSessionCapacity(c) {
 			wsFirstMessage = service.RemovePreviousResponseIDFromBody(wsFirstMessage)
 			reqLog.Debug("openai.websocket_previous_response_id_stripped_cross_group",
 				zap.Int64("account_id", account.ID),

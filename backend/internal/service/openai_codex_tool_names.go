@@ -306,6 +306,7 @@ func restoreCodexToolNamesInJSON(data []byte, reverse map[string]string) []byte 
 }
 
 func restoreCodexToolNamesFromContext(c *gin.Context, data []byte) []byte {
+	data = restoreCodexCapacityResponse(c, data)
 	reverse := codexToolNameReverseFromContext(c)
 	switch strings.TrimSpace(gjson.GetBytes(data, "type").String()) {
 	case "session.created", "session.updated":

@@ -76,7 +76,8 @@ const (
 	codexFingerprintSession codexFingerprintMode = "session"
 	// codexFingerprintFull 收敛所有标识：installation_id + session_id + thread_id。
 	// 上游看到 1 台设备 + 1 会话 + 1 线程，最激进。
-	codexFingerprintFull codexFingerprintMode = "full"
+	codexFingerprintFull     codexFingerprintMode = "full"
+	codexFingerprintCapacity codexFingerprintMode = "capacity"
 )
 
 const (
@@ -116,7 +117,7 @@ func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 	}
 	raw, _ := extra[codexFingerprintModeExtraKey].(string)
 	switch codexFingerprintMode(strings.TrimSpace(raw)) {
-	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
+	case codexFingerprintOff, codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintCapacity:
 		return codexFingerprintMode(strings.TrimSpace(raw))
 	default:
 		return codexFingerprintOff
@@ -125,7 +126,7 @@ func codexFingerprintModeFromExtra(extra map[string]any) codexFingerprintMode {
 
 func codexFingerprintModeRequiresSeed(mode codexFingerprintMode) bool {
 	switch mode {
-	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull:
+	case codexFingerprintDevice, codexFingerprintSession, codexFingerprintFull, codexFingerprintCapacity:
 		return true
 	default:
 		return false
@@ -300,7 +301,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 	}
 
 	switch mode {
-	case codexFingerprintDevice:
+	case codexFingerprintDevice, codexFingerprintCapacity:
 		return ids
 
 	case codexFingerprintSession:
@@ -362,7 +363,7 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 	// 所有非 off 模式都收敛 installation_id
 	h.Set("x-codex-installation-id", ids.installationID)
 
-	if ids.mode == codexFingerprintDevice {
+	if ids.mode == codexFingerprintDevice || ids.mode == codexFingerprintCapacity {
 		rewriteCodexTurnMetadataFields(h, map[string]any{
 			"installation_id": ids.installationID,
 		})
@@ -448,7 +449,7 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		modified = true
 	}
 
-	if ids.mode == codexFingerprintDevice {
+	if ids.mode == codexFingerprintDevice || ids.mode == codexFingerprintCapacity {
 		rewriteClientMetadataEmbeddedTurnMetadata(existing, map[string]any{
 			"installation_id": ids.installationID,
 		})

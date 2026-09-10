@@ -1,0 +1,25 @@
+# Codex session capacity（实验）
+
+基于 v0.2.4（与 139 当前 0.2.4 程序源码仅 VERSION 文件不同），移植 llm-access 434a0a2 的滚动根 session 上限和同 key 子会话挂载策略。
+
+账号编辑的「Codex 指纹收敛」选择 `capacity` 开启；默认关闭。它保留设备收敛，由容量控制独占 session/thread 的最终改写，不能同时使用旧 session/full 收敛。
+
+默认滚动窗口 600 秒，最多 5 个根 session；先尝试常规调度全部健康账号，再考虑 overflow。只有同一 API key 的已发送根 session 可作宿主，合成子会话保持独立 thread，parent 指向宿主实际 thread。每根最多 8 个窗口内活跃或持有租约的合成子会话，每账号每窗口最多新建 32 个合成子会话。原生 subagent 继承父 session，不占合成子会话额度。未发送释放预留；发送失败也保留曝光计数；活跃请求固定根 session。
+
+支持 HTTP Responses/SSE、compact 和 WS Responses。capacity 账号的 WS 使用现有 ctx_pool 逐帧规范化路径；账号配置为 off 时仍拒绝 WS；插件强制 HTTP bridge 或超大首帧需要 HTTP bridge 时明确拒绝，避免该路径删除续接状态。Messages、Chat Completions、图片独立端点不会调度到 capacity 账号。请求必须有稳定 session/thread（允许由 prompt_cache_key 推导）。请求内容、工具参数、加密内容不改写。
+
+所有客户端标识按实际凭据 namespace + API key 隔离。默认 prompt cache 跟根 session；显式独立 cache key 保留独立命名空间。响应元数据还原客户端标识，并登记 response 所属 key/thread/account。WS 新模式禁止自动删除 previous_response_id 重放；未知/跨线程的续接返回冲突。OAuth HTTP 上游不支持 previous_response_id，容量准入明确返回 400（session_continuation_requires_websocket）；HTTP 多轮请发送完整历史。
+
+## 边界
+
+- 单进程内存状态，保留 24 小时；重启清空。多实例不能共同保证上限。相同上游凭据的多个本地账号行必须统一启用和配置；不要混用新旧模式。
+- 每凭据最多 10000 个保留绑定，每绑定最多 256 个 response ID，过旧或淘汰的续接返回 409。显式容量不足返回 429/Retry-After，配置非法返回 503。WS 已升级连接使用错误事件/关闭码。
+- 改变既有账号的身份模式会改变上游标识。先从未使用的测试账号启用；现有对话继续使用原模式，不能保证跨模式延续旧 response ID。
+- 这是代理侧 session 组织策略，没有证据保证上游把合成子会话计为更少配额或降低封控。测试验证协议与隔离，不证明封控效果。
+- 可选 `extra.codex_session_capacity` 覆盖五个默认参数：`max_root_sessions`, `window_seconds`, `subagent_fallback_enabled`, `max_children_per_root`, `max_new_children_per_window`。数值须为正；停用请切换模式。
+
+## 验证与部署
+
+Go 回归覆盖并发准入、未发送回滚、发送曝光、窗口、子会话上限、真实父 thread、跨 key 隔离、续接归属、元数据还原、typed turn 引用、设备兼容和调度先普通后 overflow。前端构建包含 i18n 完整性与类型检查。真实账号仅做小请求 smoke test。
+
+部署新镜像前备份当前运行二进制、容器配置和数据库。原容器保留作为回滚。先验证候选实例，再将新连接导向候选；已建立的流留在原实例完成。切换和重启后必须检查实际版本及健康状态，不能依赖旧镜像标签。
