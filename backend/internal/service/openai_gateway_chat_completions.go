@@ -80,6 +80,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	stageCodexFingerprintIDs(c, nil)
 
 	restrictionResult := s.detectCodexClientRestriction(c, account, body)
 	logCodexCLIOnlyDetection(ctx, c, account, getAPIKeyIDFromContext(c), restrictionResult, body)
@@ -263,6 +264,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
+		// The Chat DTO omits client_metadata. Preserve the metadata used during
+		// admission before namespace/device normalization and final projection,
+		// including native child markers and turn state subject to owner checks.
+		if metadata := gjson.GetBytes(body, "client_metadata"); HasCodexSessionCapacity(c) && !isResponsesShape && metadata.IsObject() {
+			reqBody["client_metadata"] = metadata.Value()
+		}
 		isJSONObjectFormat := strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responsesBody, "text.format.type").String()), "json_object")
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
 			SkipDefaultInstructions:             !isResponsesShape,
@@ -285,6 +292,12 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 			reqBody["prompt_cache_key"] = promptCacheKey
 		}
 		applyCodexAccountIdentityClientMetadataMap(reqBody, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+		if HasCodexSessionCapacity(c) {
+			applyCodexClientMetadata(reqBody, account)
+			fpIDs := resolveCodexFingerprintIDsFromRequest(account, c.Request.Header)
+			applyCodexFingerprintClientMetadata(reqBody, fpIDs)
+			stageCodexFingerprintIDs(c, fpIDs)
+		}
 		responsesBody, err = json.Marshal(reqBody)
 		if err != nil {
 			return nil, fmt.Errorf("remarshal after codex transform: %w", err)
@@ -342,7 +355,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	if promptCacheKey != "" {
+	// The builder has already applied the admitted capacity assignment to both
+	// body and headers. A compatibility cache key must not overwrite it here.
+	if promptCacheKey != "" && !HasCodexSessionCapacity(c) {
 		apiKeyID := getAPIKeyIDFromContext(c)
 		sessionKey := promptCacheKey
 		if !compatPromptCacheTenantIsolated {
@@ -576,6 +591,9 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
+	if HasCodexSessionCapacity(c) {
+		s.relayOpenAICodexTurnState(c, account, resp.Header)
+	}
 	// 非流式响应必须为标准 JSON。上游被强制流式，其响应头 Content-Type 为
 	// text/event-stream，会经 WriteFilteredHeaders 透传进来；而 c.JSON 走 Gin 的
 	// writeContentType 仅在头不存在时才设置，无法覆盖。这里显式 Set 强制改回 JSON，
@@ -662,6 +680,17 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
+	if HasCodexSessionCapacity(c) {
+		writeHeaders := writeStreamHeaders
+		committed := false
+		writeStreamHeaders = func() {
+			if !committed {
+				committed = true
+				s.relayOpenAICodexTurnState(c, account, resp.Header)
+			}
+			writeHeaders()
+		}
+	}
 
 	state := apicompat.NewResponsesEventToChatState()
 	state.Model = originalModel

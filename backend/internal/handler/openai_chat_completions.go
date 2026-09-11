@@ -159,7 +159,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// 分组利润控制：chat completions 文本入口请求级装门并固定 pricingAt。
 	ccPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
-	c.Request = c.Request.WithContext(ccPricingCtx)
+	c.Request = c.Request.WithContext(service.WithCodexSessionCapacity(ccPricingCtx, c, body))
+	defer service.ReleaseCodexSessionCapacity(c)
 
 	for {
 		if failoverClientGone(c) {
@@ -181,6 +182,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			requestPlatform,
 		)
 		if err != nil {
+			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
+				if capacityErr.Status != http.StatusBadRequest {
+					c.Header("Retry-After", strconv.Itoa(capacityErr.RetryAfter))
+				}
+				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.Code, streamStarted)
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("openai_chat_completions.account_select_aborted_client_disconnected", zap.Error(err))
 				return

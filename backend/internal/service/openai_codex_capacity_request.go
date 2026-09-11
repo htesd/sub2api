@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -56,11 +57,31 @@ func parseCodexCapacityInput(c *gin.Context, body []byte) *codexCapacityRequest 
 		}
 		return ""
 	}
-	session := first(str(cm, "session_id"), str(turn, "session_id"), h.Get("session-id"), h.Get("session_id"), root.Get("prompt_cache_key").String())
+	p := c.Request.URL.Path
+	chatCompat := strings.HasSuffix(p, "/chat/completions")
+	headerSession := first(h.Get("session-id"), h.Get("session_id"))
+	if chatCompat {
+		headerSession = explicitOpenAIHeaderSessionID(c)
+	}
+	session := first(str(cm, "session_id"), str(turn, "session_id"), headerSession, root.Get("prompt_cache_key").String())
 	thread := first(str(cm, "thread_id"), str(turn, "thread_id"), h.Get("thread-id"), session)
 	parent := first(str(cm, "x-codex-parent-thread-id"), str(turn, "parent_thread_id"), h.Get("x-codex-parent-thread-id"))
-	p := c.Request.URL.Path
-	return &codexCapacityRequest{input: codexCapacityInput{Key: getAPIKeyIDFromContext(c), Root: session, Thread: thread, Parent: parent, Previous: root.Get("previous_response_id").String(), Mountable: strings.HasSuffix(p, "/responses") && parent == "" && str(cm, "x-openai-subagent") == "" && h.Get("x-openai-subagent") == "" && str(turn, "subagent_kind") == ""}, headers: h, originalTurn: turn, originalMetadata: cm, originalCache: root.Get("prompt_cache_key").String(), supported: strings.HasSuffix(p, "/responses") || strings.HasSuffix(p, "/responses/compact"), websocket: GetOpenAIClientTransport(c) == OpenAIClientTransportWS, restore: make(map[string]string)}
+	responses := strings.HasSuffix(p, "/responses") || chatCompat
+	previous := root.Get("previous_response_id").String()
+	mountable := responses && parent == "" && str(cm, "x-openai-subagent") == "" && h.Get("x-openai-subagent") == "" && str(turn, "subagent_kind") == ""
+	if chatCompat && session == "" && mountable && previous == "" {
+		// Stateless Chat Completions has no required conversation identifier.
+		// Count each such inbound request independently; never equate matching
+		// prompts with one conversation. This state survives internal retries.
+		session = thread
+		if session == "" {
+			session = "cc_request_" + uuid.NewString()
+		}
+		if thread == "" {
+			thread = session
+		}
+	}
+	return &codexCapacityRequest{input: codexCapacityInput{Key: getAPIKeyIDFromContext(c), Root: session, Thread: thread, Parent: parent, Previous: previous, Mountable: mountable}, headers: h, originalTurn: turn, originalMetadata: cm, originalCache: root.Get("prompt_cache_key").String(), supported: responses || strings.HasSuffix(p, "/responses/compact"), websocket: GetOpenAIClientTransport(c) == OpenAIClientTransportWS, restore: make(map[string]string)}
 }
 
 // WithCodexSessionCapacity captures client identity before any per-account transformation.
@@ -357,8 +378,8 @@ func projectCodexCapacity(c *gin.Context, account *Account, body []byte, h http.
 		} else {
 			h.Del("x-codex-parent-thread-id")
 		}
-		if a.Synthetic {
-			h.Set("x-openai-subagent", "collab_spawn")
+		if marker, _ := cm["x-openai-subagent"].(string); marker != "" {
+			h.Set("x-openai-subagent", marker)
 		}
 		if w, ok := cm["x-codex-window-id"].(string); ok {
 			h.Set("x-codex-window-id", w)
