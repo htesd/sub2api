@@ -8,7 +8,7 @@
 
 支持 HTTP Responses/SSE、compact 和 WS Responses。capacity 账号的 WS 使用现有 ctx_pool 逐帧规范化路径；账号配置为 off 时仍拒绝 WS；插件强制 HTTP bridge 或超大首帧需要 HTTP bridge 时明确拒绝，避免该路径删除续接状态。Messages、图片独立端点不会调度到 capacity 账号。原生 Responses 请求必须有稳定 session/thread（允许由 prompt_cache_key 推导）。请求内容、工具参数、加密内容不由容量策略改写。
 
-未发布的 `fix/capacity-chat-compat` 补丁增加 Chat Completions 支持：入站 `/v1/chat/completions` 先做容量准入，再通过已有转换器请求上游 Responses，返回时转换为 Chat Completions JSON/SSE，客户端不必切换协议。推荐发送按对话独立、后续轮次稳定的 `session-id`；也支持已有会话请求头别名、`client_metadata` 和显式 `prompt_cache_key`。普通请求没有标识时按每个入站请求生成独立身份，同次内部重试复用。不会将相同提示词合并为同一会话，因此无标识客户端可能更快用满容量，且缓存复用会受影响。原生 subagent 和 `previous_response_id` 续接不生成替代身份，HTTP 续接仍拒绝。该分支基于 capacity.2，不包含已回退的请求预算策略，尚未上线。
+`0.2.4-session-capacity.2-chat.1`（`fix/capacity-chat-compat`）补丁增加 Chat Completions 支持：入站 `/v1/chat/completions` 先做容量准入，再通过已有转换器请求上游 Responses，返回时转换为 Chat Completions JSON/SSE，客户端不必切换协议。推荐发送按对话独立、后续轮次稳定的 `session-id`；也支持已有会话请求头别名、`client_metadata` 和显式 `prompt_cache_key`。普通请求没有标识时按每个入站请求生成独立身份，同次内部重试复用。不会将相同提示词合并为同一会话，因此无标识客户端可能更快用满容量，且缓存复用会受影响。原生 subagent 和 `previous_response_id` 续接不生成替代身份，HTTP 续接仍拒绝。该分支基于 capacity.2，不包含已回退的请求预算策略；2026-09-11 已上线。
 
 所有客户端标识按实际凭据 namespace + API key 隔离。默认 prompt cache 跟根 session；显式独立 cache key 保留独立命名空间。响应元数据还原客户端标识，并登记 response 所属 key/thread/account。WS 新模式禁止自动删除 previous_response_id 重放；未知/跨线程的续接返回冲突。OAuth HTTP 上游不支持 previous_response_id，容量准入明确返回 400（session_continuation_requires_websocket）；HTTP 多轮请发送完整历史。
 
@@ -40,3 +40,10 @@ Chat 兼容补丁的 handler 回归带 `unit` build tag，在 `backend/` 运行 
 - 首次功能提交：`3d04e8fb0`；对应自定义部署版本为 `0.2.4-session-capacity.1`。
 - 后续先在维护分支合并选定的上游版本，重点检查调度准入、HTTP/WS 标识改写、续接归属和账号设置兼容性。运行后端完整测试、容量测试的 race 检查及前端构建，再制作带独立版本号的新镜像并验证切换。
 - 官方在线升级会替换程序并覆盖本功能；维护版本应通过本分支构建、验证和部署。账号凭据、数据库备份及生产配置不进入仓库。
+
+## Chat 兼容补丁发布记录（2026-09-11）
+
+- 运行版本 `0.2.4-session-capacity.2-chat.1`，源码 `5511411f0`，基线 `8c7f5cd49`。
+- 最终源码的后端全量测试、带 unit tag 的 Chat/容量回归通过。前端 i18n、类型检查及生产构建通过；已有 embed 测试依赖不存在的 logo.png，使用临时 PNG fixture 验证后移除，实际发布资源另在候选实例验证。
+- 候选实例使用隔离数据库和 Redis 验证健康、页面及真实 SVG；切换后真实 gpt-5.5 的 Chat JSON、Chat SSE、Responses SSE 均成功完成。
+- 保留 capacity.2 容器用于回滚；未调整账号身份/容量参数，未启用已回退的请求预算，未重启数据库或 Redis。切换替换 API 进程并清空进程内会话状态。
