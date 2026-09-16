@@ -86,6 +86,14 @@ func (s *OpenAIGatewayService) BeginOpenAIWSIngressSessionPreemptionWithClient(
 	if state, _ := ctx.Value(openAIWSSessionPreemptContextKey{}).(*openAIWSSessionPreemptState); state != nil {
 		return ctx, func() {}, true
 	}
+	if HasCodexSessionCapacity(c) {
+		// Each admitted capacity connection owns its account/thread lease.
+		// Shared client affinity must not cancel another independent socket,
+		// including one kept alive on the previous account during failover.
+		// Upstream 0.2.5 rekeys preemption on the declared execution scope;
+		// the bypass stays so capacity behaviour matches the deployed build.
+		return ctx, func() {}, false
+	}
 	var notifyPreempted func()
 	if clientConn != nil {
 		notifyPreempted = func() {

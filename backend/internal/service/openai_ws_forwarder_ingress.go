@@ -89,6 +89,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return err
 	}
+	if HasCodexSessionCapacity(c) {
+		stageCodexFingerprintIDs(c, resolveCodexFingerprintIDsFromRequest(account, c.Request.Header))
+	}
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
@@ -127,6 +130,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				"websocket mode is disabled for this account",
 				nil,
 			)
+		}
+		// Capacity projection is implemented in the normalized per-turn relay.
+		if HasCodexSessionCapacity(c) {
+			ingressMode = OpenAIWSIngressModeCtxPool
 		}
 		switch ingressMode {
 		case OpenAIWSIngressModePassthrough:
@@ -237,6 +244,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", errors.New("invalid json"))
 		}
 
+		if err := validateCodexCapacityFrame(c, trimmed); err != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
+		}
 		values := gjson.GetManyBytes(trimmed, "type", "model", "prompt_cache_key", "previous_response_id")
 		eventType := strings.TrimSpace(values[0].String())
 		normalized := trimmed
@@ -466,6 +476,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			)
 		}
 		normalized = policyApplied
+		if HasCodexSessionCapacity(c) {
+			var err error
+			normalized, err = projectCodexCapacity(c, account, normalized, nil)
+			if err != nil {
+				return openAIWSClientPayload{}, err
+			}
+		}
 		ingressSessionOriginalModel = originalModel
 
 		return openAIWSClientPayload{
@@ -522,6 +539,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	useHTTPBridge := forceHTTPBridge || s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)
+	if useHTTPBridge && HasCodexSessionCapacity(c) {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "session_capacity_http_bridge_unsupported", nil)
+	}
 	turnState := strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 	stateStore := s.getOpenAIWSStateStore()
 	groupID := getOpenAIGroupIDFromContext(c)
@@ -536,6 +556,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		sessionHash = s.GenerateSessionHash(c, payload.rawForHash)
 		if scope, _ := resolveOpenAIWSExecutionScope(c, payload.rawForHash, apiKeyID); scope != "" {
 			sessionHash = scope
+		}
+		// 容量模式再套一层凭据命名空间：执行作用域负责逻辑身份（线程/分道），
+		// 缓存的上游 turn state 和 socket 归属实际凭据，即使同一逻辑会话以完整
+		// 历史换到别的账号，也不会复用旧账号的连接状态。
+		if lease := capacityLeaseForAccount(c, account); lease != nil && sessionHash != "" {
+			sessionHash = codexCapacityNode(lease.identity, lease.key.Key, "ws-state:"+sessionHash)
 		}
 		preferredConnID = ""
 		storeDisabled = s.isOpenAIWSStoreDisabledInRequestRaw(payload.payloadRaw, account)
@@ -928,6 +954,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		connID := strings.TrimSpace(lease.ConnID())
 		if handshakeTurnState := strings.TrimSpace(lease.HandshakeHeader(openAIWSTurnStateHeader)); handshakeTurnState != "" {
+			noteCodexCapacityTurnState(c, account, handshakeTurnState)
 			turnState = handshakeTurnState
 			if stateStore != nil && sessionHash != "" {
 				stateStore.BindSessionTurnState(groupID, sessionHash, handshakeTurnState, s.openAIWSSessionStickyTTL())
@@ -963,6 +990,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		turnStart := time.Now()
 		wroteDownstream := false
+		markCodexCapacitySent(ctx)
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
@@ -1335,6 +1363,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	defer releaseSessionLease()
 
 	turn := 1
+	defer func() {
+		// The outer handler still holds the first frame. After a later turn
+		// fails it must not replay that frame on another account, or discard
+		// the current turn's previous_response_id to make it movable.
+		var failover *UpstreamFailoverError
+		if turn > 1 && HasCodexSessionCapacity(c) && errors.As(returnErr, &failover) {
+			returnErr = NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "session_retry_requires_full_history", nil)
+		}
+	}()
 	rejectedFieldRetryState = newOpenAIResponsesRejectedFieldRetryState(currentPayload)
 	turnRetry := 0
 	turnPrevRecoveryTried := false
@@ -1366,6 +1403,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		preferredConnID = ""
 	}
 	recoverIngressPrevResponseNotFound := func(relayErr error, turn int, connID string) bool {
+		if HasCodexSessionCapacity(c) {
+			return false
+		}
 		if !isOpenAIWSIngressPreviousResponseNotFound(relayErr) {
 			return false
 		}
@@ -1551,7 +1591,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		replayHasFunctionCallOutput := currentTurnReplayInputExists &&
 			openAIWSRawItemsHasFunctionCallOutput(currentTurnReplayInput)
 		hasFunctionCallOutput = hasFunctionCallOutput || replayHasFunctionCallOutput
-		if storeDisabled && turn > 1 && currentPreviousResponseID != "" {
+		if storeDisabled && turn > 1 && currentPreviousResponseID != "" && !HasCodexSessionCapacity(c) {
 			shouldKeepPreviousResponseID := false
 			strictReason := ""
 			var strictErr error
@@ -1673,7 +1713,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					hasReplayToolContext := hasFCOutput &&
 						currentTurnReplayInputExists &&
 						openAIWSRawItemsHaveToolCallContextForOutputs(currentTurnReplayInput)
-					if !turnPrevRecoveryTried && currentPreviousResponseID != "" && (!hasFCOutput || hasReplayToolContext) {
+					if !HasCodexSessionCapacity(c) && !turnPrevRecoveryTried && currentPreviousResponseID != "" && (!hasFCOutput || hasReplayToolContext) {
 						updatedPayload, removed, dropErr := dropPreviousResponseIDFromRawPayload(currentPayload)
 						if dropErr != nil || !removed {
 							reason := "not_removed"

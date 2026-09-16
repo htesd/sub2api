@@ -56,6 +56,7 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 		return
 	}
 	c.Writer.Header().Set(canonical, state)
+	noteCodexCapacityTurnState(c, account, state)
 	s.noteOpenAICodexTurnStateProvenance(c, account)
 }
 
@@ -89,6 +90,7 @@ func (s *OpenAIGatewayService) noteStagedOpenAICodexTurnStateCommitted(c *gin.Co
 	if staged == nil || strings.TrimSpace(staged.Get(openAICodexTurnStateHeader)) == "" {
 		return
 	}
+	noteCodexCapacityTurnState(c, account, staged.Get(openAICodexTurnStateHeader))
 	s.noteOpenAICodexTurnStateProvenance(c, account)
 }
 
@@ -120,6 +122,11 @@ func (s *OpenAIGatewayService) noteOpenAICodexTurnStateProvenance(c *gin.Context
 // /responses 路径的客户端是真实 Codex，会按自身回合语义自行回带；服务端
 // 注入是 Claude 兼容桥（无法回带的客户端）的专属行为。
 func (s *OpenAIGatewayService) guardOpenAICodexTurnStateEcho(c *gin.Context, account *Account, h http.Header) {
+	if HasCodexSessionCapacity(c) {
+		// Capacity uses token-level ownership during final projection. A
+		// later response on another account must not override that provenance.
+		return
+	}
 	if s == nil || h == nil || account == nil {
 		return
 	}
