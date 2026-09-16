@@ -1,6 +1,10 @@
 package service
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+)
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
@@ -16,7 +20,23 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return response, err
 		}
 	}
-	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+	return s.httpUpstream.Do(request, proxyURL, account.ID, s.openAIUpstreamConcurrency(account))
+}
+
+// openAIUpstreamConcurrency 对 OAuth 账号施加上游并发天花板。API Key 账号是
+// 用户自带额度，配额与风控由上游按 key 计量，不在此收敛。
+func (s *OpenAIGatewayService) openAIUpstreamConcurrency(account *Account) int {
+	if account == nil {
+		return 0
+	}
+	if !isOpenAIOAuthAccount(account) {
+		return account.Concurrency
+	}
+	ceiling := config.DefaultOpenAIOAuthConcurrencyCeiling
+	if s != nil && s.cfg != nil {
+		ceiling = s.cfg.Gateway.OpenAIOAuthConcurrencyCeiling
+	}
+	return account.EffectiveUpstreamConcurrency(ceiling)
 }
 
 // doOpenAIAccountTestUpstream 让 OpenAI OAuth 账号测试与真实转发使用同一插件路径。

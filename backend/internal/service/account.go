@@ -178,6 +178,25 @@ func (a *Account) EffectiveLoadFactor() int {
 	return 1
 }
 
+// EffectiveUpstreamConcurrency 返回用于上游连接池定容的每账号并发数，并施加
+// 一个天花板。ceiling<=0 表示不设天花板，直接沿用账号自身配置。
+//
+// 语义上它同时兜住两种账号：Concurrency<=0（在默认的 account_proxy 隔离下等于
+// 不限制 maxConnsPerHost）和 Concurrency 配得过大的。返回值只影响连接池尺寸与
+// 调度负载权重，不参与计费与路由决策。
+func (a *Account) EffectiveUpstreamConcurrency(ceiling int) int {
+	if a == nil {
+		return 0
+	}
+	if ceiling <= 0 {
+		return a.Concurrency
+	}
+	if a.Concurrency <= 0 || a.Concurrency > ceiling {
+		return ceiling
+	}
+	return a.Concurrency
+}
+
 func (a *Account) IsSchedulable() bool {
 	if !a.IsActive() || !a.Schedulable {
 		return false

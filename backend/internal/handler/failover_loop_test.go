@@ -65,15 +65,54 @@ func TestSameAccountRetryDelayFor(t *testing.T) {
 	})
 }
 
-func TestSameAccountRetryAllowedUsesDeadlineInsteadOfPoolCount(t *testing.T) {
+// deadline 与次数是两个独立预算，任一耗尽即停。此前 deadline 会豁免次数上限，
+// 单个请求因此能在 2 分钟窗口内对同一个已限流账号无上限重打。
+func TestSameAccountRetryAllowedBoundsDeadlineByRetryCount(t *testing.T) {
 	err := &service.UpstreamFailoverError{
 		RetryableOnSameAccount:   true,
 		SameAccountRetryDeadline: time.Now().Add(time.Minute),
 	}
-	require.True(t, sameAccountRetryAllowed(err, 100, 0))
-	require.True(t, sameAccountRetryAllowed(err, 100, maxSameAccountRetries))
+	require.True(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
+	require.False(t, sameAccountRetryAllowed(err, 100, maxSameAccountRetries), "deadline 不再豁免次数上限")
+	require.False(t, sameAccountRetryAllowed(err, 100, 0), "预算为 0 时始终禁止")
+	require.False(t, sameAccountRetryAllowed(err, 0, 0), "预算为 0 时始终禁止")
+
 	err.SameAccountRetryDeadline = time.Now().Add(-time.Second)
 	require.False(t, sameAccountRetryAllowed(err, 0, 100))
+}
+
+// 429 的等待塞不进剩余 deadline 时不应该先睡再打：那次重试注定越界。
+func TestSameAccountRetryAllowedRejects429WaitBeyondDeadline(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		RetryableOnSameAccount:   true,
+		StatusCode:               http.StatusTooManyRequests,
+		SameAccountRetryDeadline: time.Now().Add(30 * time.Second),
+		SameAccountRetryDelay:    90 * time.Second,
+	}
+	require.False(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
+
+	err.SameAccountRetryDelay = time.Second
+	require.True(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries))
+}
+
+// 429 退避为指数且只做正向抖动，因此永远不会短于上游 Retry-After。
+func TestSameAccountRetryDelayFor429IsExponentialAndNeverUndershootsRetryAfter(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		StatusCode:               http.StatusTooManyRequests,
+		SameAccountRetryDeadline: time.Now().Add(2 * time.Minute),
+	}
+	first := sameAccountRetryDelayFor(err, 1)
+	require.GreaterOrEqual(t, first, time.Second)
+	require.Less(t, first, 2*time.Second)
+
+	third := sameAccountRetryDelayFor(err, 3)
+	require.GreaterOrEqual(t, third, 4*time.Second)
+
+	err.SameAccountRetryDelay = 30 * time.Second
+	require.GreaterOrEqual(t, sameAccountRetryDelayFor(err, 1), 30*time.Second)
+
+	err.SameAccountRetryDelay = 0
+	require.LessOrEqual(t, sameAccountRetryDelayFor(err, 99), maxRequestScopedRetryDelay+maxRequestScopedRetryDelay/5)
 }
 
 func TestSameAccountRetryAllowedRequiresOptInAndDefaultsToCountLimit(t *testing.T) {
@@ -374,7 +413,8 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 		require.Zero(t, fs.SwitchCount)
 	})
 
-	t.Run("OAuth deadline存在时不按普通计数切换", func(t *testing.T) {
+	// 存在 deadline 时仍受次数预算约束：次数用完就换号，而不是在窗口内继续同号重打。
+	t.Run("OAuth deadline存在时次数耗尽仍切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(3, true)
 		fs.SameAccountRetryCount[100] = maxSameAccountRetries
@@ -384,9 +424,23 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
 
+		require.Equal(t, 1, fs.SwitchCount)
+		require.Equal(t, maxSameAccountRetries, fs.SameAccountRetryCount[100], "切换不再推进同号计数")
+	})
+
+	// deadline 内且次数未用完时保持同号重试，避免退化成"429 立刻换号"。
+	t.Run("OAuth deadline存在且次数未耗尽时同号重试", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, true)
+		err := newTestFailoverErr(http.StatusTooManyRequests, true, false)
+		err.SameAccountRetryDeadline = time.Now().Add(time.Minute)
+		err.SameAccountRetryDelay = time.Nanosecond
+
+		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
 		require.False(t, fs.ForceCacheBilling)
 		require.Zero(t, fs.SwitchCount)
-		require.Equal(t, maxSameAccountRetries+1, fs.SameAccountRetryCount[100])
+		require.Equal(t, 1, fs.SameAccountRetryCount[100])
 		require.Empty(t, mock.calls)
 	})
 

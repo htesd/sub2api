@@ -200,7 +200,10 @@ func TestRateLimitService_ClearRateLimit_WithoutTempUnschedCache(t *testing.T) {
 	require.Equal(t, 1, repo.clearTempUnschedCalls)
 }
 
-func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearsErrorAndRateLimitRelatedState(t *testing.T) {
+// 一次测试探测只能说明"这一个请求通过了"，不能证明配额窗口已重置。
+// 此前它会清掉 rate-limit / temp-unsched，把仍在限流中的账号立刻放回池子，
+// 紧接着又被上游 429 打回——冷却因此形同虚设。清除只保留给显式恢复入口。
+func TestRateLimitService_RecoverAccountAfterSuccessfulTest_DoesNotClearRuntimeState(t *testing.T) {
 	now := time.Now()
 	repo := &rateLimitClearRepoStub{
 		getByIDAccount: &Account{
@@ -226,14 +229,24 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearsErrorAndRateLi
 	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 42)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.True(t, result.ClearedError)
-	require.True(t, result.ClearedRateLimit)
+	require.False(t, result.ClearedError)
+	require.False(t, result.ClearedRateLimit)
 
-	require.Equal(t, 1, repo.getByIDCalls)
-	require.Equal(t, 1, repo.clearErrorCalls)
+	require.Equal(t, 1, repo.getByIDCalls, "仍需校验账号存在")
+	require.Equal(t, 0, repo.clearErrorCalls)
+	require.Equal(t, 0, repo.clearRateLimitCalls)
+	require.Equal(t, 0, repo.clearAntigravityCalls)
+	require.Equal(t, 0, repo.clearModelRateLimitCalls)
+	require.Equal(t, 0, repo.clearTempUnschedCalls)
+	require.Empty(t, cache.deletedIDs)
+	require.Empty(t, blocker.clearedIDs)
+
+	// 同样的脏状态，走显式恢复入口时仍必须被清干净。
+	explicit, err := svc.RecoverAccountState(context.Background(), 42, AccountRecoveryOptions{})
+	require.NoError(t, err)
+	require.True(t, explicit.ClearedError)
+	require.True(t, explicit.ClearedRateLimit)
 	require.Equal(t, 1, repo.clearRateLimitCalls)
-	require.Equal(t, 1, repo.clearAntigravityCalls)
-	require.Equal(t, 1, repo.clearModelRateLimitCalls)
 	require.Equal(t, 1, repo.clearTempUnschedCalls)
 	require.Equal(t, []int64{42}, cache.deletedIDs)
 	require.Equal(t, []int64{42}, blocker.clearedIDs)
@@ -266,7 +279,20 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_NoRecoverableStateIs
 	require.Empty(t, cache.deletedIDs)
 }
 
-func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearErrorFailed(t *testing.T) {
+// 保留"账号不存在"的错误契约：测一个已删除账号仍应报错而不是静默成功。
+func TestRateLimitService_RecoverAccountAfterSuccessfulTest_PropagatesLookupError(t *testing.T) {
+	repo := &rateLimitClearRepoStub{getByIDErr: errors.New("account not found")}
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+
+	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 9)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, 1, repo.getByIDCalls)
+	require.Equal(t, 0, repo.clearErrorCalls)
+}
+
+// 显式恢复入口的失败传播不受影响。
+func TestRateLimitService_RecoverAccountState_ClearErrorFailed(t *testing.T) {
 	repo := &rateLimitClearRepoStub{
 		getByIDAccount: &Account{
 			ID:     9,
@@ -276,7 +302,7 @@ func TestRateLimitService_RecoverAccountAfterSuccessfulTest_ClearErrorFailed(t *
 	}
 	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 
-	result, err := svc.RecoverAccountAfterSuccessfulTest(context.Background(), 9)
+	result, err := svc.RecoverAccountState(context.Background(), 9, AccountRecoveryOptions{})
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Equal(t, 1, repo.getByIDCalls)

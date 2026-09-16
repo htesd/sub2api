@@ -13,8 +13,18 @@ const (
 	openAIAccountStateUpdateTimeout       = 5 * time.Second
 	openAIOAuth429FallbackCooldown        = 5 * time.Second
 	openAIOAuth429RetryWindow             = 2 * time.Minute
-	openAIOAuth429RetryDelay              = 500 * time.Millisecond
-	openAIOAuth429MaxRetryDelay           = 8 * time.Second
+	openAIOAuth429RetryDelay              = time.Second
+	openAIOAuth429MaxSameAccountRetries   = 3
+	// retryAfterMaxAccountPark 限制"仅凭 Retry-After"能把账号停多久。
+	// x-codex-* 配额窗口是可信的长等待证据，裸 Retry-After 只是背压提示：
+	// 不设上限的话，一个 Retry-After: 86400 就能把整池账号停一天。
+	retryAfterMaxAccountPark = 15 * time.Minute
+	// retryAfterSameAccountWaitBudget 是"原地等 vs 换号"的分界。
+	//
+	// 换号会丢掉 prompt cache 亲和，并把同一个会话线程摊到更多账号上（反关联
+	// 意义上也更差）。因此短等待原地等：走有界的同号重试，退避不短于 Retry-After。
+	// 超过这个预算才说明账号真的进了限流窗口，此时停号 + 换号比干等划算。
+	retryAfterSameAccountWaitBudget = 5 * time.Second
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second
@@ -35,6 +45,9 @@ const (
 	openAIOAuth429Quota5h
 	openAIOAuth429Quota7d
 	openAIOAuth429QuotaReset
+	// openAIOAuth429RetryAfter：上游用 Retry-After 明确给出了等待时刻。
+	// 它不是瞬时抖动，把它当瞬时 429 处理会导致在明知要等的窗口内继续同号重试。
+	openAIOAuth429RetryAfter
 )
 
 // classifyOpenAIOAuth429 区分账号配额耗尽信号与普通瞬时 429。只有窗口达到
@@ -66,6 +79,13 @@ func classifyOpenAIOAuth429(headers http.Header, responseBody []byte) (openAIOAu
 	if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
 		resetAt := time.Unix(*resetUnix, 0)
 		return openAIOAuth429QuotaReset, &resetAt
+	}
+	// 上游给了较长的 Retry-After：这不是瞬时抖动，别在它明确拒绝的窗口里继续同号
+	// 重试。短等待仍按瞬时处理，由有界的同号重试原地消化，保住会话亲和。
+	if resetAt := clampRetryAfterPark(parseRetryAfterResetTime(headers, time.Now())); resetAt != nil {
+		if time.Until(*resetAt) > retryAfterSameAccountWaitBudget {
+			return openAIOAuth429RetryAfter, resetAt
+		}
 	}
 	return openAIOAuth429Transient, nil
 }
@@ -309,17 +329,13 @@ func openAIOAuth429SameAccountRetryDelay(headers http.Header, deadline time.Time
 	delay := openAIOAuth429RetryDelay
 	now := time.Now()
 	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
-		delay = resetAt.Sub(now)
+		if wait := resetAt.Sub(now); wait > delay {
+			delay = wait
+		}
 	}
-	if delay > openAIOAuth429MaxRetryDelay {
-		delay = openAIOAuth429MaxRetryDelay
-	}
-	if remaining := time.Until(deadline); !deadline.IsZero() && delay > remaining {
-		delay = remaining
-	}
-	if delay < 0 {
-		return 0
-	}
+	// deadline 只决定"这次重试还准不准"，不能用来腰斩上游要求的等待时长：
+	// 把 Retry-After 截短后重试，等于在上游明确拒绝的窗口内继续打它。
+	// 塞不进剩余预算的重试由 handler 侧直接拒绝（deadline 因此在此不再参与计算）。
 	return delay
 }
 

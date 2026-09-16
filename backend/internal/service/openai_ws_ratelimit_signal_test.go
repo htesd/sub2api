@@ -555,7 +555,8 @@ func TestOpenAIWSErrorHTTPStatusFromRaw_UsageLimitReachedIs429(t *testing.T) {
 
 func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing.T) {
 	svc := &OpenAIGatewayService{}
-	headers := http.Header{"Retry-After": []string{"30"}}
+	// 无任何限流证据的 429 才是瞬时抖动：保留同号重试窗口，并带上次数上限。
+	headers := http.Header{}
 	body := []byte(`{"error":{"type":"rate_limit_error","message":"limited"}}`)
 
 	oauthErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
@@ -566,9 +567,8 @@ func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing
 	require.True(t, oauthErr.RetryableOnSameAccount)
 	require.False(t, oauthErr.SameAccountRetryDeadline.IsZero())
 	require.Positive(t, oauthErr.SameAccountRetryDelay)
-	require.LessOrEqual(t, oauthErr.SameAccountRetryDelay, openAIOAuth429MaxRetryDelay)
+	require.Equal(t, openAIOAuth429MaxSameAccountRetries, oauthErr.SameAccountRetryMax)
 	require.Equal(t, body, oauthErr.ResponseBody)
-	require.Equal(t, "30", oauthErr.ResponseHeaders.Get("Retry-After"))
 
 	apiKeyErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
 		ID:       905,
@@ -578,4 +578,22 @@ func TestOpenAIWSRateLimitFailoverError_OAuthKeepsSameAccountDeadline(t *testing
 	require.False(t, apiKeyErr.RetryableOnSameAccount)
 	require.True(t, apiKeyErr.SameAccountRetryDeadline.IsZero())
 	require.Zero(t, apiKeyErr.SameAccountRetryDelay)
+}
+
+// 带 Retry-After 的 WS 429 不再同号重试：上游已经说了要等多久，
+// 在这个窗口内继续打它只会加深限流。
+func TestOpenAIWSRateLimitFailoverError_RetryAfterDisablesSameAccountRetry(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	headers := http.Header{"Retry-After": []string{"30"}}
+	body := []byte(`{"error":{"type":"rate_limit_error","message":"limited"}}`)
+
+	oauthErr := svc.newOpenAIWSRateLimitFailoverError(&Account{
+		ID:       906,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+	}, headers, body, "limited")
+	require.False(t, oauthErr.RetryableOnSameAccount)
+	require.True(t, oauthErr.SameAccountRetryDeadline.IsZero())
+	require.Zero(t, oauthErr.SameAccountRetryDelay)
+	require.Equal(t, "30", oauthErr.ResponseHeaders.Get("Retry-After"))
 }

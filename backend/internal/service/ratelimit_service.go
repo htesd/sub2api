@@ -1242,6 +1242,19 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			}
 		}
 
+		// 响应体没给重置时间，但上游给了 Retry-After：它就是上游自己说的等待时长，
+		// 比任何兜底猜测都准确，优先按它冷却。clampRetryAfterPark 负责收口，
+		// 避免一个超长 Retry-After 把整池账号停掉。
+		if resetAt := clampRetryAfterPark(parseRetryAfterResetTime(headers, time.Now())); resetAt != nil {
+			s.notifyAccountSchedulingBlocked(account, *resetAt, "429_retry_after")
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
+				return
+			}
+			slog.Info("account_rate_limited", "account_id", account.ID, "platform", account.Platform, "reset_at", *resetAt, "reset_in", time.Until(*resetAt).Truncate(time.Second), "source", "retry_after")
+			return
+		}
+
 		// Anthropic 平台：没有限流重置时间的 429 可能是非真实限流（如 Extra usage required），
 		// 不适合按 5h/7d 窗口长时间封禁；但完全不标记会导致账号永不冷却，
 		// 调度器让每个请求反复撞同一批持续 429 的账号（failover 预算被白白烧掉，
@@ -2147,10 +2160,21 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	return result, nil
 }
 
-// RecoverAccountAfterSuccessfulTest 将一次成功测试视为正常请求，
-// 按需恢复 error / rate-limit / overload / temp-unsched / model-rate-limit 等运行时状态。
+// RecoverAccountAfterSuccessfulTest 不再自动清除运行时状态。
+//
+// 一次测试探测只能说明"这一个请求通过了"，不能证明配额窗口已重置：探测走的是
+// 最小请求，与真实流量的模型、上下文长度、并发都不同。此前一次成功测试会清掉
+// rate-limit / overload / temp-unsched，把仍在限流中的账号立刻放回池子，紧接着
+// 又被上游 429 打回——冷却因此形同虚设。
+//
+// 管理员确认状态后仍可通过 RecoverAccountState（POST /accounts/:id/recover-state）
+// 显式恢复。
 func (s *RateLimitService) RecoverAccountAfterSuccessfulTest(ctx context.Context, accountID int64) (*SuccessfulTestRecoveryResult, error) {
-	return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{})
+	// 保留"账号不存在"的错误契约：测一个已删除账号仍应报错而不是静默成功。
+	if _, err := s.accountRepo.GetByID(ctx, accountID); err != nil {
+		return nil, err
+	}
+	return &SuccessfulTestRecoveryResult{}, nil
 }
 
 func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID int64) error {
@@ -2397,6 +2421,23 @@ func openAIImageRateLimitResetAt(headers http.Header, body []byte) time.Time {
 		return now.Add(cooldown)
 	}
 	return now.Add(openAIImageRateLimitDefaultCooldown)
+}
+
+// clampRetryAfterPark 把"仅凭 Retry-After 冷却账号"限制在合理窗口内，并丢弃
+// 已经过期的时刻。裸 Retry-After 是背压提示而非配额证据：不设上限的话，一个
+// Retry-After: 86400 就能把整池账号停一天。
+func clampRetryAfterPark(resetAt *time.Time) *time.Time {
+	if resetAt == nil {
+		return nil
+	}
+	now := time.Now()
+	if !resetAt.After(now) {
+		return nil
+	}
+	if capped := now.Add(retryAfterMaxAccountPark); resetAt.After(capped) {
+		return &capped
+	}
+	return resetAt
 }
 
 func parseRetryAfterResetTime(headers http.Header, now time.Time) *time.Time {

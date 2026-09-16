@@ -56,6 +56,10 @@ const (
 	ConnectionPoolIsolationAccountProxy = "account_proxy"
 )
 
+// DefaultOpenAIOAuthConcurrencyCeiling 是 OpenAI OAuth 账号的默认上游并发天花板。
+// 取 16：既不至于限制正常的多会话使用，又能挡住"未配置并发"的账号被无上限灌流。
+const DefaultOpenAIOAuthConcurrencyCeiling = 16
+
 // DefaultUpstreamResponseReadMaxBytes 上游非流式响应体的默认读取上限。
 // 128 MB 可容纳 2-3 张 4K PNG（base64 膨胀 33%，单张 4K PNG 最坏约 67MB base64）。
 // 可通过 gateway.upstream_response_read_max_bytes 配置项覆盖。
@@ -960,6 +964,17 @@ type GatewayConfig struct {
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
 	// 0 表示回退到 OpenAIFirstOutputTimeoutSeconds。
 	OpenAIHighEffortFirstOutputTimeoutSeconds int `mapstructure:"openai_high_effort_first_output_timeout_seconds"`
+	// OpenAIOAuthConcurrencyCeiling: OpenAI OAuth 账号的上游并发天花板。
+	//
+	// 账号 Concurrency<=0 在默认的 account_proxy 隔离下等于"不限制 maxConnsPerHost"，
+	// 单个账号可以被灌进任意多条并发流；上游按账号做容量削峰时，这类账号最先被
+	// 拒（overload/429），也最像自动化流量。该天花板同时约束"未配置"和"配置过大"
+	// 两种情况，只影响连接池定容与调度负载权重，不改变任何计费或路由语义。
+	//
+	// 0 表示不设天花板（沿用账号自身配置）。它与 codex_session_capacity 的
+	// max_root_sessions 是两个正交维度：这里限制"同时在飞的请求数"，那里限制
+	// "对上游暴露的根会话数"。
+	OpenAIOAuthConcurrencyCeiling int `mapstructure:"openai_oauth_concurrency_ceiling"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
@@ -2369,6 +2384,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
+	viper.SetDefault("gateway.openai_oauth_concurrency_ceiling", DefaultOpenAIOAuthConcurrencyCeiling)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
@@ -3304,6 +3320,9 @@ func (c *Config) Validate() error {
 	if c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 1800 ||
 		(c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 30) {
 		return fmt.Errorf("gateway.openai_high_effort_first_output_timeout_seconds must be 0 or between 30-1800 seconds")
+	}
+	if c.Gateway.OpenAIOAuthConcurrencyCeiling < 0 || c.Gateway.OpenAIOAuthConcurrencyCeiling > 1024 {
+		return fmt.Errorf("gateway.openai_oauth_concurrency_ceiling must be between 0-1024")
 	}
 	if c.Gateway.Live.MaxSessionDurationSeconds <= 0 {
 		c.Gateway.Live.MaxSessionDurationSeconds = 3600

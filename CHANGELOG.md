@@ -1,3 +1,27 @@
+## [0.2.5-session-capacity-antistorm.1] - 2026-09-16
+### Features
+- OAuth 429 同号重试改为有界预算：`SameAccountRetryMax = 3`，退避 1s→2s→4s（上限 8s）并叠加正向抖动。此前 2 分钟窗口内不受次数限制，单个请求能对同一个已限流账号连打十几次。
+- 上游 `Retry-After` 不再被截断到 8 秒。等待塞不进剩余窗口的重试由 handler 侧直接拒绝，而不是先睡一个被腰斩的时长再打。
+- 新增 429 处置分类 `openAIOAuth429RetryAfter`：`Retry-After` 超过 `retryAfterSameAccountWaitBudget`（5s）时按它冷却账号并换号，不再当瞬时抖动做同号重试。
+- 全平台补齐 `Retry-After` → 账号级冷却：响应体没给重置时间但上游给了 `Retry-After` 时按它冷却，不再落到秒级兜底猜测（`429_retry_after`）。
+- 账号级限流写入改为单调延长：`SetRateLimited` 委托 `SetRateLimitedIfLater`，只有显式恢复能清除。
+- 新增 `gateway.openai_oauth_concurrency_ceiling`（默认 16，0 = 关闭）：OpenAI OAuth 账号的上游并发天花板，同时兜住"未配置并发"和"配得过大"两种账号。
+### Fixes
+- 一次成功的账号测试不再自动清除 rate-limit / overload / temp-unsched / model-rate-limit。探测走最小请求，与真实流量的模型、上下文长度、并发都不同，它只能说明"这一个请求通过了"。管理员仍可通过 `POST /accounts/:id/recover-state` 显式恢复。
+- `Retry-After` 停车时长收口到 15 分钟（`retryAfterMaxAccountPark`）：此前完全信任响应头，一个 `Retry-After: 86400` 就能把整池账号停一天。
+### Design Rationale
+- 这批改动不减少封控本身，减少的是网关自己制造的重试放大。线上日志里 `pool_mode_same_account_retry` 4093 次、`overloaded` 670 次，同号无界重试 + 被截断的 `Retry-After` 是可验证的放大源；`.ban-investigation.md` 里"重试级联"同样排在成因第 3 位。
+- 短 `Retry-After`（≤5s）保留同号重试，是对参考实现的有意偏离：无条件换号会丢掉 prompt cache 亲和，并把同一会话线程摊到更多账号上，反关联意义上更差。为 1 秒钟的等待放弃亲和不值得。因此短等待原地消化（退避不短于 `Retry-After`），只有长等待才停号换号。
+- 并发天花板与 `codex_session_capacity` 的 `max_root_sessions` 是两个正交维度：前者限制"同时在飞的请求数"（连接池定容与调度负载权重），后者限制"对上游暴露的根会话数"（身份投影）。默认隔离是 `account_proxy`，`Concurrency<=0` 等于不限制 `maxConnsPerHost`，因此"未配置"恰好是最危险的取值。
+- 天花板只影响连接池尺寸与负载权重，不参与计费与路由；API Key 账号是用户自带额度、由上游按 key 计量，不在网关侧收敛。
+### Notes & Caveats
+- 唯一客户端可见的行为变化：长 `Retry-After` 的 429 现在更快换号或更快返回，不再出现"等 40 秒后成功"。作为交换，账号被按上游要求的时长停用而不是继续挨打。
+- `SetRateLimited` 单调化影响所有平台的全部调用点。副作用是短窗口不能再覆盖长窗口——这是有意的，代价是误判的长冷却只能靠显式恢复清除。
+- 天花板对存量账号立即生效（运行时计算，不写库、无迁移）。并发确实需要超过 16 的部署请显式调大 `gateway.openai_oauth_concurrency_ceiling`。
+- 未移植参考实现的健康度自动隔离（10 分钟错误率 ≥50% → 停 30 分钟）：它需要新的错误率统计面，且与既有 `TempUnschedulable`、配额阈值停用、runtime block 三套机制的优先级需要先理清，本版不做。
+- 未移植 TLS 指纹预设与强制 HTTP/1.1。uTLS dialer 与 `Profile` 上游本就有，参考实现只是加了两个写死的预设并默认挂给新账号；其 transport 显式关闭 HTTP/2，能消灭 h2 `INTERNAL_ERROR`，但一个自称 Node/Codex 的客户端只谈 `http/1.1` 本身就是可辨识特征，需要 A/B 才能判断净收益。
+- 验证：`go build ./...`、`go test ./...`、`go test -tags unit ./...`、容量与 429 回归 `-race` 全部通过。`go test -tags unit ./internal/service` 中 `TestValidateCreateParams_CheckModeMatrix/quota_probe_requires_primary_model` 失败，需要 DNS，在干净基线上同样失败。`-race` 下 `gin.SetMode` 的 6 处 data race 同样在基线复现，属既有测试脚手架问题。前端未改动，未跑前端构建。未做真实账号 smoke test。
+
 ## [0.2.5-session-capacity.4] - 2026-09-16
 ### Features
 - 合并上游 v0.2.5（`881f32026`）：抢占旁路移入 `BeginOpenAIWSIngressSessionPreemptionWithClient` 并保留上游 `*openAIWSSessionPreemptState` 断言；WS 会话状态键改为「上游执行作用域 + capacity 凭据命名空间」的组合键，兼顾并发 subagent 隔离与换号不复用旧连接状态。

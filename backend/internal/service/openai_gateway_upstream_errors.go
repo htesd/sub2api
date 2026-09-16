@@ -391,6 +391,9 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 	if oauth429Retry {
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
 		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
+		// 2 分钟窗口本身不是次数预算：没有次数上限时单个请求能对同一个已限流
+		// 账号连打十几次，这是 429 自我放大的主因。
+		failoverErr.SameAccountRetryMax = openAIOAuth429MaxSameAccountRetries
 	}
 	return failoverErr
 }

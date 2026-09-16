@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -361,10 +362,45 @@ func TestOpenAIHTTP429StillUsesQuotaResetHeaders(t *testing.T) {
 	require.Greater(t, time.Until(blockedUntil), 6*24*time.Hour, "real HTTP 429 must retain the upstream quota reset")
 }
 
-func TestOpenAI429RetryDelayHonorsBoundedRetryAfter(t *testing.T) {
+// Retry-After 不再被截断：截短后重试等于在上游明确拒绝的窗口内继续打它。
+// 塞不进剩余预算的重试改由 handler 侧直接拒绝。
+func TestOpenAI429RetryDelayHonorsFullRetryAfter(t *testing.T) {
 	deadline := time.Now().Add(openAIOAuth429RetryWindow)
 	require.Equal(t, openAIOAuth429RetryDelay, openAIOAuth429SameAccountRetryDelay(nil, deadline))
-	require.Equal(t, openAIOAuth429MaxRetryDelay, openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline))
+
+	delay := openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"90"}}, deadline)
+	require.InDelta(t, (90 * time.Second).Seconds(), delay.Seconds(), 1)
+
+	// 短于基础间隔的 Retry-After 不得把等待压到基础间隔以下。
+	short := openAIOAuth429SameAccountRetryDelay(http.Header{"Retry-After": []string{"0.1"}}, deadline)
+	require.Equal(t, openAIOAuth429RetryDelay, short)
+}
+
+// 带 Retry-After 的 429 是"上游让你等"，不是瞬时抖动：不再同号重试，
+// 直接按 Retry-After 冷却账号并换号。
+func TestClassifyOpenAI429TreatsRetryAfterAsAccountCooldown(t *testing.T) {
+	disposition, resetAt := classifyOpenAIOAuth429(http.Header{"Retry-After": []string{"45"}}, nil)
+	require.Equal(t, openAIOAuth429RetryAfter, disposition)
+	require.NotNil(t, resetAt)
+	require.InDelta(t, 45.0, time.Until(*resetAt).Seconds(), 2)
+
+	// 短 Retry-After 仍按瞬时处理：原地等比换号划算，会话亲和不该为 1 秒钟让路。
+	short, _ := classifyOpenAIOAuth429(http.Header{"Retry-After": []string{"1"}}, nil)
+	require.Equal(t, openAIOAuth429Transient, short)
+	boundary, _ := classifyOpenAIOAuth429(
+		http.Header{"Retry-After": []string{strconv.Itoa(int(retryAfterSameAccountWaitBudget.Seconds()))}},
+		nil,
+	)
+	require.Equal(t, openAIOAuth429Transient, boundary)
+
+	// 超长 Retry-After 被收口，避免一个响应头停掉整池账号。
+	_, capped := classifyOpenAIOAuth429(http.Header{"Retry-After": []string{"86400"}}, nil)
+	require.NotNil(t, capped)
+	require.InDelta(t, retryAfterMaxAccountPark.Seconds(), time.Until(*capped).Seconds(), 2)
+
+	// 没有任何限流证据的 429 仍是瞬时抖动，保留同号重试窗口。
+	plain, _ := classifyOpenAIOAuth429(http.Header{}, nil)
+	require.Equal(t, openAIOAuth429Transient, plain)
 }
 
 func TestOpenAI429FastPath_OpenCodeGoUsageLimitUsesMessageResetDuration(t *testing.T) {
