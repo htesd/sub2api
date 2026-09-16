@@ -73,6 +73,15 @@ func configureChatCapacityAccounts(accounts []service.Account) {
 	accounts[1].Schedulable = false
 }
 
+// configureChatCapacityAccountsWithoutAdmission 保留身份投影，去掉根会话准入，
+// 也就是 capacity 模式的默认配置。
+func configureChatCapacityAccountsWithoutAdmission(accounts []service.Account) {
+	configureChatCapacityAccounts(accounts)
+	for i := range accounts {
+		delete(accounts[i].Extra, "codex_session_capacity")
+	}
+}
+
 func chatCapacityContext(t *testing.T, body, session string) (*gin.Context, *httptest.ResponseRecorder) {
 	c, rec := newOpenAIResponsesFailoverTestContext(t, nil)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -126,19 +135,41 @@ func TestChatCapacityConvertsBothResponseModes(t *testing.T) {
 	}
 }
 
-func TestChatCapacityStatelessRequestsCountIndependentlyAndReturn429(t *testing.T) {
+// 准入开启时上限才有意义，此时无标识请求必须明确要求客户端补稳定会话标识，
+// 而不是先放进去占一个根、下一个请求再回 429（那样客户端只会一直重试）。
+func TestChatCapacityStatelessRequestsRequireIdentityWhenAdmissionEnabled(t *testing.T) {
 	upstream := &chatCapacityCapture{}
 	h := newOpenAIResponsesFailoverTestHandler(t, upstream, configureChatCapacityAccounts)
 	body := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
-	c, first := chatCapacityContext(t, body, "")
+	c, rec := chatCapacityContext(t, body, "")
 	h.ChatCompletions(c)
-	require.Equal(t, 200, first.Code, first.Body.String())
-	c, second := chatCapacityContext(t, body, "")
-	h.ChatCompletions(c)
-	require.Equal(t, 429, second.Code, second.Body.String())
-	require.Contains(t, second.Body.String(), "session_roots_full")
-	require.NotEmpty(t, second.Header().Get("Retry-After"))
-	require.Len(t, upstream.bodies, 1, "capacity denial must not call upstream")
+	require.Equal(t, 400, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "session_identity_required")
+	require.Contains(t, rec.Body.String(), "stable session-id")
+	require.Empty(t, rec.Header().Get("Retry-After"), "400 不能带重试提示")
+	require.Empty(t, upstream.bodies, "本地拒绝不触达上游")
+}
+
+// 准入关闭（capacity 模式的默认状态）时只做身份投影：无标识请求照常服务，
+// 每个入站请求拿到独立身份，不受根会话数量限制。
+func TestChatCapacityStatelessRequestsServedWithoutAdmission(t *testing.T) {
+	upstream := &chatCapacityCapture{}
+	h := newOpenAIResponsesFailoverTestHandler(t, upstream, configureChatCapacityAccountsWithoutAdmission)
+	body := `{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`
+	for i := 0; i < 3; i++ {
+		c, rec := chatCapacityContext(t, body, "")
+		h.ChatCompletions(c)
+		require.Equal(t, 200, rec.Code, rec.Body.String())
+	}
+	require.Len(t, upstream.bodies, 3)
+	sessions := map[string]bool{}
+	for i, sent := range upstream.bodies {
+		session := gjson.Get(sent, "client_metadata.session_id").String()
+		require.NotEmpty(t, session)
+		require.False(t, sessions[session], "无标识请求不能被合并成同一会话")
+		sessions[session] = true
+		require.Equal(t, session, upstream.headers[i].Get("session_id"))
+	}
 }
 
 func TestChatCapacityPreservesToolHistoryAndImages(t *testing.T) {
@@ -231,7 +262,8 @@ func TestChatCapacityStatelessRetryAndFailover(t *testing.T) {
 				upstream.failureStatus = 429
 			}
 			h := newOpenAIResponsesFailoverTestHandler(t, upstream, func(accounts []service.Account) {
-				configureChatCapacityAccounts(accounts)
+				// 无标识请求只在准入关闭时合法，这里验证的是重试/换号时的身份复用。
+				configureChatCapacityAccountsWithoutAdmission(accounts)
 				if !same {
 					accounts[1].Schedulable = true
 				}
@@ -252,11 +284,11 @@ func TestChatCapacityStatelessRetryAndFailover(t *testing.T) {
 				require.Equal(t, upstream.headers[i].Get("session_id"), gjson.Get(sent, "client_metadata.session_id").String())
 				require.Equal(t, upstream.headers[i].Get("thread-id"), gjson.Get(sent, "client_metadata.thread_id").String())
 			}
-			// Failed sends retain exposure; retries must not create extra roots.
-			c, denied := chatCapacityContext(t, body, "")
+			// 准入关闭时后续无标识请求继续正常服务，不会被本地策略拒绝。
+			c, next := chatCapacityContext(t, body, "")
 			h.ChatCompletions(c)
-			require.Equal(t, 429, denied.Code, denied.Body.String())
-			require.Len(t, upstream.bodies, 2)
+			require.Equal(t, 200, next.Code, next.Body.String())
+			require.Len(t, upstream.bodies, 3)
 		})
 	}
 }

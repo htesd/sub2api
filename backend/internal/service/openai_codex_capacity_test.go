@@ -20,6 +20,12 @@ import (
 func capacityInput(key int64, root, thread string) codexCapacityInput {
 	return codexCapacityInput{Key: key, Root: root, Thread: thread, Mountable: true}
 }
+
+// capacityAdmissionPolicy 是显式开启根会话准入的策略；默认策略只做身份投影，
+// 准入相关的回归必须自己声明上限，否则测不到限制。
+func capacityAdmissionPolicy() CodexSessionCapacityPolicy {
+	return CodexSessionCapacityPolicy{MaxRootSessions: 5, WindowSeconds: 600, SubagentFallbackEnabled: true, MaxChildrenPerRoot: 8, MaxNewChildrenPerWindow: 32}
+}
 func exposeCapacity(t *testing.T, r *codexCapacityRegistry, p CodexSessionCapacityPolicy, in codexCapacityInput, now time.Time) *codexCapacityLease {
 	t.Helper()
 	l, err := r.reserve("account", p, in, false, now)
@@ -31,7 +37,7 @@ func exposeCapacity(t *testing.T, r *codexCapacityRegistry, p CodexSessionCapaci
 func TestCodexCapacityOverflowAndIsolation(t *testing.T) {
 	now := time.Now()
 	r := newCodexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	for i := 0; i < 5; i++ {
 		exposeCapacity(t, r, p, capacityInput(1, fmt.Sprint("root", i), fmt.Sprint("thread", i)), now.Add(time.Duration(i)*time.Second))
 	}
@@ -50,14 +56,18 @@ func TestCodexCapacityOverflowAndIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, child.Assignment, again.Assignment)
 	again.release()
-	_, err = r.reserve("account", p, capacityInput(2, "other", "other"), true, now.Add(11*time.Second))
-	require.Equal(t, "session_no_eligible_host", AsCodexSessionCapacityError(err).Code)
+	// 每个 api key 有独立的根预算：key 1 用满既不影响 key 2，也不会跨 key 挂载
+	// （跨 key 共享根意味着共享 prompt cache key 和上下文，不能这么做）。
+	otherKey, err := r.reserve("account", p, capacityInput(2, "other", "other"), true, now.Add(11*time.Second))
+	require.NoError(t, err)
+	require.False(t, otherKey.Assignment.Synthetic)
+	otherKey.release()
 	require.NotEqual(t, codexCapacityNode("account", 1, "x"), codexCapacityNode("account", 2, "x"))
 	require.NotEqual(t, codexCapacityNode("account", 1, "x"), codexCapacityNode("other-account", 1, "x"))
 }
 func TestCodexCapacityConcurrentReservationsAndCancel(t *testing.T) {
 	r := newCodexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	now := time.Now()
 	var accepted atomic.Int32
 	var wg sync.WaitGroup
@@ -91,7 +101,7 @@ func TestCodexCapacityConcurrentReservationsAndCancel(t *testing.T) {
 }
 func TestCodexCapacityChildLimitsWindowAndNativeChild(t *testing.T) {
 	r := newCodexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	p.MaxRootSessions = 1
 	p.MaxChildrenPerRoot = 2
 	p.MaxNewChildrenPerWindow = 2
@@ -117,16 +127,21 @@ func TestCodexCapacityChildLimitsWindowAndNativeChild(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, l.Assignment.Synthetic)
 	l.release()
-	// A live lease pins its root after the rolling window expires.
-	held, err := r.reserve("account", p, capacityInput(1, "root", "host-thread"), false, now)
+	// 既有会话在窗口外恢复不受新根上限限制（上限只约束新根暴露）。
+	resumed, err := r.reserve("account", p, capacityInput(1, "root", "host-thread"), false, now.Add(time.Hour))
 	require.NoError(t, err)
-	_, err = r.reserve("account", p, capacityInput(1, "blocked", "blocked"), false, now.Add(time.Hour))
-	require.Error(t, err)
-	held.release()
+	// 让出的根位可以被全新的根拿到。
+	fresh, err := r.reserve("account", p, capacityInput(1, "blocked", "blocked"), false, now.Add(time.Hour))
+	require.NoError(t, err)
+	// 尚未发送的租约立刻占位，避免并发把同一个空槽双开成两个新根。
+	_, err = r.reserve("account", p, capacityInput(1, "blocked-again", "blocked-again"), false, now.Add(time.Hour))
+	require.Equal(t, "session_roots_full", AsCodexSessionCapacityError(err).Code)
+	fresh.release()
+	resumed.release()
 }
 func TestCodexCapacityContinuationOwnership(t *testing.T) {
 	r := newCodexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	now := time.Now()
 	in := capacityInput(1, "root", "thread")
 	l := exposeCapacity(t, r, p, in, now)
@@ -151,7 +166,8 @@ func capacityContext(t *testing.T, body []byte) (*gin.Context, *Account, *OpenAI
 	c.Set("api_key", &APIKey{ID: 1})
 	c.Request = c.Request.WithContext(WithCodexSessionCapacity(c.Request.Context(), c, body))
 	t.Cleanup(func() { ReleaseCodexSessionCapacity(c) })
-	a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 10, Extra: map[string]any{"codex_fingerprint_mode": "capacity", "codex_fingerprint_seed": "00000000-0000-4000-8000-000000000001"}, Credentials: map[string]any{"chatgpt_account_id": "account"}}
+	// 根会话准入默认关闭，容量相关回归必须在账号上显式打开上限。
+	a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 10, Extra: map[string]any{"codex_fingerprint_mode": "capacity", "codex_fingerprint_seed": "00000000-0000-4000-8000-000000000001", "codex_session_capacity": map[string]any{"max_root_sessions": 5}}, Credentials: map[string]any{"chatgpt_account_id": "account"}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{*a}}, cache: &schedulerTestGatewayCache{}, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
 	return c, a, svc
 }
@@ -159,7 +175,7 @@ func TestCodexCapacityProjectionAndResponseRestore(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.1","prompt_cache_key":"child","input":[{"role":"user","content":"child","internal_chat_message_metadata_passthrough":{"turn_id":"turn"}}],"client_metadata":{"session_id":"child","thread_id":"child","x-codex-turn-metadata":"{\"turn_id\":\"turn\",\"window_id\":\"child:2\",\"note\":\"中文😀\"}"}}`)
 	c, a, svc := capacityContext(t, body)
 	r := svc.codexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	p.MaxRootSessions = 1
 	now := time.Now()
 	identity := codexAccountIdentityNamespace(a)
@@ -211,7 +227,7 @@ func TestCodexCapacitySchedulerNormalBeforeOverflow(t *testing.T) {
 	second.ID = 2
 	second.Credentials = map[string]any{"chatgpt_account_id": "second"}
 	svc.accountRepo = schedulerTestOpenAIAccountRepo{accounts: []Account{*a, second}}
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	r := svc.codexCapacityRegistry()
 	now := time.Now()
 	for i := 0; i < 5; i++ {
@@ -250,7 +266,7 @@ func TestCodexCapacityDeviceModeDoesNotFlattenThreads(t *testing.T) {
 }
 func TestCodexCapacityCancellationKeepsAdmissionUntilForwardReturns(t *testing.T) {
 	r := newCodexCapacityRegistry()
-	l, err := r.reserve("account", defaultCodexCapacityPolicy(), capacityInput(1, "r", "t"), false, time.Now())
+	l, err := r.reserve("account", capacityAdmissionPolicy(), capacityInput(1, "r", "t"), false, time.Now())
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -266,7 +282,7 @@ func TestCodexCapacityCancellationKeepsAdmissionUntilForwardReturns(t *testing.T
 
 func TestCodexCapacityConcurrentAccountScopedBindings(t *testing.T) {
 	r := newCodexCapacityRegistry()
-	p := defaultCodexCapacityPolicy()
+	p := capacityAdmissionPolicy()
 	var wg sync.WaitGroup
 	var accepted atomic.Int32
 	for i := 0; i < 40; i++ {
@@ -300,7 +316,7 @@ func TestCodexCapacityMixedPoolCannotReplayForeignContinuation(t *testing.T) {
 	svc.accountRepo = schedulerTestOpenAIAccountRepo{accounts: []Account{ordinary, *a}}
 	r := svc.codexCapacityRegistry()
 	in := capacityInput(1, "root", "original")
-	l, err := r.reserve(codexAccountIdentityNamespace(a), defaultCodexCapacityPolicy(), in, false, time.Now())
+	l, err := r.reserve(codexAccountIdentityNamespace(a), capacityAdmissionPolicy(), in, false, time.Now())
 	require.NoError(t, err)
 	l.sent(time.Now())
 	l.rememberResponse("resp_known", time.Now())
@@ -313,7 +329,7 @@ func TestCodexCapacityWSOmittedIdentityAndDeviceMetadata(t *testing.T) {
 	c, a, svc := capacityContext(t, body)
 	c.Request.Header.Set("session-id", "root")
 	state := codexCapacityFromGin(c)
-	l, err := svc.codexCapacityRegistry().reserve(codexAccountIdentityNamespace(a), defaultCodexCapacityPolicy(), state.input, false, time.Now())
+	l, err := svc.codexCapacityRegistry().reserve(codexAccountIdentityNamespace(a), capacityAdmissionPolicy(), state.input, false, time.Now())
 	require.NoError(t, err)
 	state.stage(a.ID, l, l.release)
 	ids := resolveCodexFingerprintIDsFromRequest(a, c.Request.Header)
@@ -333,7 +349,7 @@ func TestCodexCapacityHTTPContinuationFailsExplicitly(t *testing.T) {
 	c, a, svc := capacityContext(t, []byte(`{"prompt_cache_key":"root","previous_response_id":"resp_http"}`))
 	in := capacityInput(1, "root", "root")
 	r := svc.codexCapacityRegistry()
-	l, err := r.reserve(codexAccountIdentityNamespace(a), defaultCodexCapacityPolicy(), in, false, time.Now())
+	l, err := r.reserve(codexAccountIdentityNamespace(a), capacityAdmissionPolicy(), in, false, time.Now())
 	require.NoError(t, err)
 	l.sent(time.Now())
 	l.rememberResponse("resp_http", time.Now())

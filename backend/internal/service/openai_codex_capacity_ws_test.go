@@ -44,7 +44,7 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 	account := &Account{ID: 114, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"chatgpt_account_id": "wire-account"}, Extra: map[string]any{"codex_fingerprint_mode": "capacity", "codex_fingerprint_seed": "00000000-0000-4000-8000-000000000001", "responses_websockets_v2_enabled": true, "openai_oauth_responses_websockets_v2_mode": "ctx_pool"}}
 	registry := svc.codexCapacityRegistry()
 	identity := codexAccountIdentityNamespace(account)
-	policy := defaultCodexCapacityPolicy()
+	policy := capacityAdmissionPolicy()
 	policy.MaxRootSessions = 1
 	host, err := registry.reserve(identity, policy, capacityInput(1, "root", "host-thread"), false, time.Now())
 	require.NoError(t, err)
@@ -140,4 +140,30 @@ func testCodexCapacityWSMultiTurnWire(t *testing.T, failLater bool) {
 		require.Equal(t, codexCapacityNode(identity, 1, fmt.Sprintf("turn-%d", i+1)), gjson.Get(turn, "turn_id").String())
 	}
 	require.Equal(t, "resp_first", gjson.GetBytes(payloadAsJSONBytes(capture.writes[1]), "previous_response_id").String())
+}
+
+// 增量帧的一致性判断只看帧内显式声明的标识：首帧身份来自请求头时，后续帧里
+// 的 prompt_cache_key 与它不同并不代表换了会话，不能用 409 关掉正常连接。
+func TestCodexCapacityFrameValidationUsesDeclaredIdentityOnly(t *testing.T) {
+	first := []byte(`{"model":"gpt-5.1","prompt_cache_key":"cache-key"}`)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request.Header.Set("session-id", "conversation")
+	c.Set("api_key", &APIKey{ID: 1})
+	c.Request = c.Request.WithContext(WithCodexSessionCapacity(c.Request.Context(), c, first))
+	t.Cleanup(func() { ReleaseCodexSessionCapacity(c) })
+	state := codexCapacityFromGin(c)
+	require.Equal(t, "conversation", state.input.Root)
+	require.Equal(t, "conversation", state.input.Thread)
+	require.False(t, state.input.Ephemeral)
+	registry := newCodexCapacityRegistry()
+	lease, err := registry.reserve("account", capacityAdmissionPolicy(), state.input, false, time.Now())
+	require.NoError(t, err)
+	state.stage(1, lease, lease.release)
+	require.NoError(t, validateCodexCapacityFrame(c, first))
+	require.NoError(t, validateCodexCapacityFrame(c, []byte(`{"prompt_cache_key":"cache-key","client_metadata":{"session_id":"conversation","thread_id":"conversation"}}`)))
+	err = validateCodexCapacityFrame(c, []byte(`{"client_metadata":{"thread_id":"other"}}`))
+	require.Equal(t, "session_thread_changed", AsCodexSessionCapacityError(err).Code)
+	err = validateCodexCapacityFrame(c, []byte(`{"client_metadata":{"session_id":"other"}}`))
+	require.Equal(t, "session_root_changed", AsCodexSessionCapacityError(err).Code)
 }

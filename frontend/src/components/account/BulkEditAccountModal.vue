@@ -1714,7 +1714,7 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
   { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
- { value: 'capacity' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintCapacity') },
+  { value: 'capacity' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintCapacity') },
 ])
 const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAICompactModelMappings = ref<ModelMapping[]>([])

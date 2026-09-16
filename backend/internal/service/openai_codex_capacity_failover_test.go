@@ -20,7 +20,7 @@ func TestCodexCapacitySchedulerFailoverAfterExposure(t *testing.T) {
 			state := codexCapacityFromGin(c)
 			registry := svc.codexCapacityRegistry()
 			identity := codexAccountIdentityNamespace(a)
-			old, err := registry.reserve(identity, defaultCodexCapacityPolicy(), state.input, false, time.Now())
+			old, err := registry.reserve(identity, capacityAdmissionPolicy(), state.input, false, time.Now())
 			require.NoError(t, err)
 			old.sent(time.Now()) // Upstream failures still count exposure.
 			old.rememberResponse("resp_old", time.Now())
@@ -46,8 +46,15 @@ func TestCodexCapacitySchedulerFailoverAfterExposure(t *testing.T) {
 				return
 			}
 			if scenario == "no_capacity_alternative" {
-				require.Error(t, err)
-				require.NotEqual(t, "session_owner_unavailable", err.Error())
+				// affinity 是偏好而非排他约束：capacity 候选耗尽后允许退回普通
+				// 账号，不能因为本地容量策略把请求打成 429/503。
+				require.NoError(t, err)
+				require.Equal(t, second.ID, selected.Account.ID)
+				require.Nil(t, capacityLeaseForAccount(c, selected.Account), "普通账号不持容量租约")
+				require.False(t, HasCodexSessionCapacity(c))
+				if selected.ReleaseFunc != nil {
+					selected.ReleaseFunc()
+				}
 				return
 			}
 			require.NoError(t, err)
@@ -71,7 +78,7 @@ func TestCodexCapacitySchedulerFailoverAfterExposure(t *testing.T) {
 			responseOwner, err := registry.continuationOwner(continued, time.Now())
 			require.NoError(t, err)
 			require.Equal(t, identity, responseOwner)
-			original, err := registry.reserve(identity, defaultCodexCapacityPolicy(), continued, false, time.Now())
+			original, err := registry.reserve(identity, capacityAdmissionPolicy(), continued, false, time.Now())
 			require.NoError(t, err)
 			original.release()
 		})
@@ -80,7 +87,7 @@ func TestCodexCapacitySchedulerFailoverAfterExposure(t *testing.T) {
 
 func TestCodexCapacityFailoverStillEnforcesTargetCapacityAndContinuation(t *testing.T) {
 	registry := newCodexCapacityRegistry()
-	policy := defaultCodexCapacityPolicy()
+	policy := capacityAdmissionPolicy()
 	policy.MaxRootSessions = 1
 	now := time.Now()
 	in := capacityInput(1, "root", "root")
@@ -111,7 +118,7 @@ func TestCodexCapacityFailoverStillEnforcesTargetCapacityAndContinuation(t *test
 
 func TestCodexCapacityActiveLeasePinsAccountCapacityNotOtherAccounts(t *testing.T) {
 	registry := newCodexCapacityRegistry()
-	policy := defaultCodexCapacityPolicy()
+	policy := capacityAdmissionPolicy()
 	policy.MaxRootSessions = 1
 	now := time.Now()
 	in := capacityInput(1, "root", "root")
@@ -123,10 +130,35 @@ func TestCodexCapacityActiveLeasePinsAccountCapacityNotOtherAccounts(t *testing.
 	require.NotEqual(t, first.Assignment.ThreadID, second.Assignment.ThreadID)
 	second.sent(now)
 	second.release()
-	_, err = registry.reserve("old", policy, capacityInput(1, "other", "other"), false, now.Add(time.Hour))
+	// 窗口内的活跃租约仍然占住本账号的根位（另一账号刚才已独立拿到同一逻辑根）。
+	_, err = registry.reserve("old", policy, capacityInput(1, "other", "other"), false, now.Add(time.Minute))
 	require.Equal(t, "session_roots_full", AsCodexSessionCapacityError(err).Code)
 	first.release()
-	fresh, err := registry.reserve("old", policy, capacityInput(1, "other", "other"), false, now.Add(time.Hour))
+	later := now.Add(time.Duration(policy.WindowSeconds)*time.Second + time.Minute)
+	fresh, err := registry.reserve("old", policy, capacityInput(1, "other", "other"), false, later)
 	require.NoError(t, err)
 	fresh.release()
+}
+
+// 空闲超过窗口的长连接不再永久占用根位；它恢复说话时按既有会话豁免放行，
+// 不会在第二轮被自己的上限打成 429。
+func TestCodexCapacityIdleLeaseReleasesRootAndResumeIsGrandfathered(t *testing.T) {
+	registry := newCodexCapacityRegistry()
+	policy := capacityAdmissionPolicy()
+	policy.MaxRootSessions = 1
+	now := time.Now()
+	idle := capacityInput(1, "root", "root")
+	held, err := registry.reserve("account", policy, idle, false, now)
+	require.NoError(t, err)
+	held.sent(now)
+	later := now.Add(time.Duration(policy.WindowSeconds)*time.Second + time.Minute)
+	fresh, err := registry.reserve("account", policy, capacityInput(1, "other", "other"), false, later)
+	require.NoError(t, err, "空闲租约让出根位")
+	fresh.sent(later)
+	resumed, err := registry.reserve("account", policy, idle, false, later)
+	require.NoError(t, err, "既有会话继续说话不受新根上限限制")
+	require.Equal(t, held.Assignment.ThreadID, resumed.Assignment.ThreadID)
+	resumed.release()
+	fresh.release()
+	held.release()
 }

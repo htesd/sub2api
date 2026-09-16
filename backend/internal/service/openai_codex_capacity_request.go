@@ -59,29 +59,51 @@ func parseCodexCapacityInput(c *gin.Context, body []byte) *codexCapacityRequest 
 	}
 	p := c.Request.URL.Path
 	chatCompat := strings.HasSuffix(p, "/chat/completions")
-	headerSession := first(h.Get("session-id"), h.Get("session_id"))
-	if chatCompat {
-		headerSession = explicitOpenAIHeaderSessionID(c)
-	}
-	session := first(str(cm, "session_id"), str(turn, "session_id"), headerSession, root.Get("prompt_cache_key").String())
+	// 会话标识按上游规范列表识别（session-id/session_id/conversation_id/opencode/
+	// codeBuddy），不能只认两个头：否则粘性路由认得的客户端在这里会被判成无标识。
+	session := first(str(cm, "session_id"), str(turn, "session_id"), explicitOpenAIHeaderSessionID(c), root.Get("prompt_cache_key").String())
 	thread := first(str(cm, "thread_id"), str(turn, "thread_id"), h.Get("thread-id"), session)
 	parent := first(str(cm, "x-codex-parent-thread-id"), str(turn, "parent_thread_id"), h.Get("x-codex-parent-thread-id"))
 	responses := strings.HasSuffix(p, "/responses") || chatCompat
 	previous := root.Get("previous_response_id").String()
 	mountable := responses && parent == "" && str(cm, "x-openai-subagent") == "" && h.Get("x-openai-subagent") == "" && str(turn, "subagent_kind") == ""
-	if chatCompat && session == "" && mountable && previous == "" {
-		// Stateless Chat Completions has no required conversation identifier.
-		// Count each such inbound request independently; never equate matching
-		// prompts with one conversation. This state survives internal retries.
+	ephemeral := false
+	// 只声明了线程标识（例如仅发 thread-id 头）时，该线程就是它自己的根。
+	if session == "" && thread != "" {
 		session = thread
-		if session == "" {
-			session = "cc_request_" + uuid.NewString()
-		}
-		if thread == "" {
-			thread = session
-		}
 	}
-	return &codexCapacityRequest{input: codexCapacityInput{Key: getAPIKeyIDFromContext(c), Root: session, Thread: thread, Parent: parent, Previous: previous, Mountable: mountable}, headers: h, originalTurn: turn, originalMetadata: cm, originalCache: root.Get("prompt_cache_key").String(), supported: responses || strings.HasSuffix(p, "/responses/compact"), websocket: GetOpenAIClientTransport(c) == OpenAIClientTransportWS, restore: make(map[string]string)}
+	if session == "" && thread == "" && previous == "" && parent == "" {
+		// 无状态入口（Chat Completions、不带标识的 Responses）没有必须的会话标识。
+		// 为每个入站请求合成独立身份：只做投影隔离，绝不把相同提示词当成同一对话。
+		// 同一次内部重试沿用这份状态。准入开启时 plan 会明确要求客户端给稳定标识。
+		session = "s2a_req_" + uuid.NewString()
+		thread = session
+		ephemeral = true
+	}
+	return &codexCapacityRequest{input: codexCapacityInput{Key: getAPIKeyIDFromContext(c), Root: session, Thread: thread, Parent: parent, Previous: previous, Mountable: mountable, Ephemeral: ephemeral}, headers: h, originalTurn: turn, originalMetadata: cm, originalCache: root.Get("prompt_cache_key").String(), supported: responses || strings.HasSuffix(p, "/responses/compact"), websocket: GetOpenAIClientTransport(c) == OpenAIClientTransportWS, restore: make(map[string]string)}
+}
+
+// codexCapacityDeclaredIdentity 只取请求体里显式声明的会话/线程标识。
+// prompt_cache_key 与请求头的回退不参与帧一致性判断，避免把"同一会话的另一种
+// 表达"误判成换了会话。
+func codexCapacityDeclaredIdentity(body []byte) (session string, thread string) {
+	view := openAIRequestPayloadView(body)
+	turnRaw := view.Get("client_metadata.x-codex-turn-metadata").String()
+	pick := func(paths ...string) string {
+		for _, path := range paths {
+			var value string
+			if strings.HasPrefix(path, "turn.") {
+				value = gjson.Get(turnRaw, strings.TrimPrefix(path, "turn.")).String()
+			} else {
+				value = view.Get(path).String()
+			}
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	return pick("client_metadata.session_id", "turn.session_id"), pick("client_metadata.thread_id", "turn.thread_id")
 }
 
 // WithCodexSessionCapacity captures client identity before any per-account transformation.
@@ -130,7 +152,10 @@ func (r *codexCapacityRequest) stage(accountID int64, l *codexCapacityLease, rel
 	r.restore = make(map[string]string)
 	prior := l.previousIdentity
 	if prior == "" {
-		prior = l.identity
+		// 归属未知（进程重启、绑定过期、客户端换了线程）时按外来处理。
+		// 把别的账号签发的 turn state 发给当前账号会直接触发上游会话链鉴权失败；
+		// 剥掉它最多损失一次前缀缓存命中，代价远小于整轮失败。
+		prior = codexCapacityForeignIdentity
 	}
 	bodyToken, _ := r.originalMetadata[openAICodexTurnStateHeader].(string)
 	for _, token := range []string{r.headers.Get(openAICodexTurnStateHeader), bodyToken} {
@@ -172,25 +197,21 @@ func validateCodexCapacityFrame(c *gin.Context, body []byte) error {
 	if r.lease == nil {
 		return nil
 	}
-	// Incremental frames inherit connection identity. The initial parser's
-	// thread=session fallback must not overwrite a distinct admitted thread.
+	// 增量帧继承连接身份：解析器只用来刷新 turn 元数据，一致性判断改用帧内
+	// 显式声明的标识。帧上下文不带请求头，否则首帧来自请求头的身份会和帧内
+	// 的 prompt_cache_key 对不上，把正常连接误判成换会话（409 会直接关连接）。
 	frameContext := &gin.Context{Request: c.Request.Clone(c.Request.Context())}
 	frameContext.Request.Header = make(http.Header)
 	frame := parseCodexCapacityInput(frameContext, body)
-	view := openAIRequestPayloadView(body)
-	hasThread := view.Get("client_metadata.thread_id").String() != "" || gjson.Get(view.Get("client_metadata.x-codex-turn-metadata").String(), "thread_id").String() != ""
-	if !hasThread {
-		frame.input.Thread = r.input.Thread
-	}
-	if frame.input.Root == "" {
-		frame.input.Root = r.input.Root
-	}
-
-	if frame.input.Thread != "" && frame.input.Thread != r.input.Thread {
-		return capacityError("session_thread_changed", 409, 1)
-	}
-	if frame.input.Root != "" && frame.input.Root != r.input.Root {
-		return capacityError("session_root_changed", 409, 1)
+	// 合成身份的连接没有可比对的客户端标识，后续帧的声明无从校验。
+	if !r.input.Ephemeral {
+		declaredRoot, declaredThread := codexCapacityDeclaredIdentity(body)
+		if declaredThread != "" && declaredThread != r.input.Thread {
+			return capacityError("session_thread_changed", 409, 1)
+		}
+		if declaredRoot != "" && declaredRoot != r.input.Root {
+			return capacityError("session_root_changed", 409, 1)
+		}
 	}
 	if frame.input.Previous != "" {
 		in := r.input

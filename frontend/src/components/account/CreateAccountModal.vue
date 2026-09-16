@@ -4445,7 +4445,7 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
   { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
- { value: 'capacity' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintCapacity') },
+  { value: 'capacity' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintCapacity') },
 ])
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
 const anthropicPassthroughEnabled = ref(false)

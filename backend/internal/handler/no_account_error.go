@@ -42,6 +42,15 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if err == nil {
 		return fallback
 	}
+	// 容量投影是 Responses 系列的能力约束，不是临时缺号：其它入口不能把这个
+	// 明确拒绝包装成可重试的 503，否则客户端会一直重试且看不到真正的原因。
+	if e := service.AsCodexSessionCapacityError(err); e != nil && e.Code == "session_capacity_requires_responses" {
+		return noAccountErrorClassification{
+			Status:  http.StatusBadRequest,
+			ErrType: e.Code,
+			Message: e.ClientMessage(),
+		}
+	}
 	// A 404 model_not_found fallback is authoritative and must not be downgraded
 	// to a rate-limit verdict. classifyNoAccountError only reaches it through
 	// DiagnoseModelAvailabilityForPlatform, a dedicated database query over

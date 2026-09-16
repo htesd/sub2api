@@ -41,14 +41,20 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			owner = s.codexCapacityRegistry().boundOwner(state.input)
 		}
 	}
-	passes := 2
+	// 显式的准入梯度，取代原来的 pass 位运算：
+	// 1) 优先账号，仅常规容量  2) 优先账号，允许 overflow 挂载
+	// 3) 其他 capacity 账号     4) 其他 capacity 账号 + overflow
+	// 5) 最后兜底：允许非 capacity 账号（affinity 是偏好，不是排他约束）
+	type capacityPass struct{ failover, overflow, plain bool }
+	plan := []capacityPass{{}, {overflow: true}}
 	if owner != "" && state.input.Previous == "" {
-		// Exhaust the preferred account (including overflow) before rebuilding
-		// a request without server-side continuation on another capacity account.
-		passes = 4
+		plan = append(plan, capacityPass{failover: true}, capacityPass{failover: true, overflow: true})
+		// 严格续接必须留在真正生成响应的账号上，其余请求宁可退回普通账号，
+		// 也不能因为本地容量策略把请求打成 429/503。
+		plan = append(plan, capacityPass{failover: true, overflow: true, plain: true})
 	}
-	for pass := 0; pass < passes; pass++ {
-		failover := pass >= 2
+	for pass := 0; pass < len(plan); pass++ {
+		failover, overflow, plain := plan[pass].failover, plan[pass].overflow, plan[pass].plain
 		excluded := make(map[int64]struct{}, len(excludedIDs))
 		for id := range excludedIDs {
 			excluded[id] = struct{}{}
@@ -67,7 +73,11 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			}
 			account := selection.Account
 			policy, enabled := account.codexCapacityPolicy()
-			if !enabled && owner == "" {
+			if !enabled && (owner == "" || plain) {
+				if owner != "" {
+					slog.Info("codex_capacity_plain_fallback",
+						"account_id", account.ID, "reason", "capacity_candidates_exhausted")
+				}
 				return selection, decision, nil
 			}
 			source := account
@@ -95,7 +105,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 			case state == nil || !state.supported:
 				err = capacityError("session_capacity_requires_responses", 400, 1)
 			default:
-				lease, err = s.codexCapacityRegistry().reserve(identity, policy, state.input, pass%2 == 1, time.Now())
+				lease, err = s.codexCapacityRegistry().reserve(identity, policy, state.input, overflow, time.Now())
 			}
 			if err == nil {
 				release := lease.release
@@ -103,9 +113,28 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 				if failover && owner != identity {
 					slog.Info("codex_capacity_failover", "account_id", account.ID)
 				}
+				if lease.Assignment.Synthetic {
+					occupancy := s.codexCapacityRegistry().occupancy(identity, state.input.Key, policy, time.Now())
+					slog.Info("codex_capacity_mounted",
+						"account_id", account.ID, "api_key_id", state.input.Key,
+						"roots", occupancy.Roots, "root_limit", occupancy.RootLimit,
+						"new_children_in_window", occupancy.NewChildren)
+				}
 				// The request context owns the lease, including wait-plan and streaming paths.
 				// The concurrency slot keeps its existing, independent lifetime.
 				return selection, decision, nil
+			}
+			if capacityErr := AsCodexSessionCapacityError(err); capacityErr != nil && state != nil {
+				occupancy := s.codexCapacityRegistry().occupancy(identity, state.input.Key, policy, time.Now())
+				slog.Info("codex_capacity_rejected",
+					"account_id", account.ID, "api_key_id", state.input.Key,
+					"code", capacityErr.Code, "status", capacityErr.Status,
+					"pass", pass, "overflow", overflow, "plain", plain,
+					"roots", occupancy.Roots, "root_limit", occupancy.RootLimit,
+					"bindings", occupancy.Bindings,
+					"new_children_in_window", occupancy.NewChildren,
+					"admission_enabled", policy.admissionEnabled(),
+					"ephemeral_identity", state.input.Ephemeral)
 			}
 			if selection.ReleaseFunc != nil {
 				selection.ReleaseFunc()
@@ -125,6 +154,11 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	}
 	if owner != "" && state.input.Previous != "" && errors.Is(lastErr, ErrNoAvailableAccounts) {
 		lastErr = capacityError("session_owner_unavailable", 409, 1)
+	}
+	if capacityErr := AsCodexSessionCapacityError(lastErr); capacityErr != nil {
+		slog.Warn("codex_capacity_selection_failed", "code", capacityErr.Code,
+			"status", capacityErr.Status, "retry_after", capacityErr.RetryAfter,
+			"passes", len(plan), "owner_bound", owner != "")
 	}
 	return nil, lastDecision, lastErr
 }

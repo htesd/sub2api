@@ -183,10 +183,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		)
 		if err != nil {
 			if capacityErr := service.AsCodexSessionCapacityError(err); capacityErr != nil {
-				if capacityErr.Status != http.StatusBadRequest {
+				if capacityErr.RetryAfter > 0 {
 					c.Header("Retry-After", strconv.Itoa(capacityErr.RetryAfter))
 				}
-				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.Code, streamStarted)
+				h.handleStreamingAwareError(c, capacityErr.Status, capacityErr.Code, capacityErr.ClientMessage(), streamStarted)
 				return
 			}
 			if failoverClientGone(c) {

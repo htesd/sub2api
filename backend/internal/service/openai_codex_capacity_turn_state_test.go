@@ -14,7 +14,7 @@ func TestCodexCapacityFailoverStripsForeignTurnStateAcrossRequests(t *testing.T)
 	c, a, svc := capacityContext(t, body)
 	registry := svc.codexCapacityRegistry()
 	in := codexCapacityFromGin(c).input
-	old, err := registry.reserve(codexAccountIdentityNamespace(a), defaultCodexCapacityPolicy(), in, false, time.Now())
+	old, err := registry.reserve(codexAccountIdentityNamespace(a), capacityAdmissionPolicy(), in, false, time.Now())
 	require.NoError(t, err)
 	old.sent(time.Now())
 	old.release()
@@ -26,7 +26,7 @@ func TestCodexCapacityFailoverStripsForeignTurnStateAcrossRequests(t *testing.T)
 			c, _, _ = capacityContext(t, body)
 		}
 		state := codexCapacityFromGin(c)
-		lease, err := registry.reserve(codexAccountIdentityNamespace(&second), defaultCodexCapacityPolicy(), state.input, false, time.Now())
+		lease, err := registry.reserve(codexAccountIdentityNamespace(&second), capacityAdmissionPolicy(), state.input, false, time.Now())
 		require.NoError(t, err)
 		state.stage(second.ID, lease, lease.release)
 		headers := http.Header{}
@@ -42,12 +42,36 @@ func TestCodexCapacityFailoverStripsForeignTurnStateAcrossRequests(t *testing.T)
 	require.False(t, registry.foreignTurnState(2, "opaque-old", "new", "new"), "keys have separate token ownership")
 }
 
+// 归属未知时（进程重启清空注册表、绑定过期、客户端换线程）客户端回带的
+// turn state 必须按外来处理剥掉：把别的账号签发的 token 发给当前账号会直接
+// 触发上游会话链鉴权失败。
+func TestCodexCapacityUnknownTurnStateProvenanceIsStripped(t *testing.T) {
+	body := []byte(`{"prompt_cache_key":"root","client_metadata":{"x-codex-turn-state":"opaque-from-previous-process"}}`)
+	c, a, svc := capacityContext(t, body)
+	registry := svc.codexCapacityRegistry()
+	state := codexCapacityFromGin(c)
+	lease, err := registry.reserve(codexAccountIdentityNamespace(a), capacityAdmissionPolicy(), state.input, false, time.Now())
+	require.NoError(t, err)
+	require.Empty(t, lease.previousIdentity, "重启后没有任何绑定归属信息")
+	state.stage(a.ID, lease, lease.release)
+	headers := http.Header{}
+	headers.Set(openAICodexTurnStateHeader, "opaque-from-previous-process")
+	projected, err := projectCodexCapacity(c, a, body, headers)
+	require.NoError(t, err)
+	require.Empty(t, headers.Get(openAICodexTurnStateHeader))
+	require.False(t, gjson.GetBytes(projected, "client_metadata.x-codex-turn-state").Exists())
+	// 上游真的签发之后，同一个 token 才属于本账号，不再被剥。
+	headers.Set(openAICodexTurnStateHeader, "opaque-from-previous-process")
+	svc.relayOpenAICodexTurnState(c, a, headers)
+	require.False(t, registry.foreignTurnState(1, "opaque-from-previous-process", codexAccountIdentityNamespace(a), codexAccountIdentityNamespace(a)))
+}
+
 func TestCodexCapacityTurnStateTracksEmitterBeforeFirstEcho(t *testing.T) {
 	c, a, svc := capacityContext(t, []byte(`{"prompt_cache_key":"root"}`))
 	state := codexCapacityFromGin(c)
 	registry := svc.codexCapacityRegistry()
 	identity := codexAccountIdentityNamespace(a)
-	lease, err := registry.reserve(identity, defaultCodexCapacityPolicy(), state.input, false, time.Now())
+	lease, err := registry.reserve(identity, capacityAdmissionPolicy(), state.input, false, time.Now())
 	require.NoError(t, err)
 	state.stage(a.ID, lease, lease.release)
 	headers := http.Header{}
