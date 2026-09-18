@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	openAIAccountStateUpdateTimeout       = 5 * time.Second
-	openAIOAuth429FallbackCooldown        = 5 * time.Second
-	openAIOAuth429RetryWindow             = 2 * time.Minute
-	openAIOAuth429RetryDelay              = time.Second
-	openAIOAuth429MaxSameAccountRetries   = 3
+	openAIAccountStateUpdateTimeout     = 5 * time.Second
+	openAIOAuth429FallbackCooldown      = 5 * time.Second
+	openAIOAuth429RetryWindow           = 2 * time.Minute
+	openAIOAuth429RetryDelay            = time.Second
+	openAIOAuth429MaxSameAccountRetries = 3
 	// retryAfterMaxAccountPark 限制"仅凭 Retry-After"能把账号停多久。
 	// x-codex-* 配额窗口是可信的长等待证据，裸 Retry-After 只是背压提示：
 	// 不设上限的话，一个 Retry-After: 86400 就能把整池账号停一天。
@@ -24,7 +24,7 @@ const (
 	// 换号会丢掉 prompt cache 亲和，并把同一个会话线程摊到更多账号上（反关联
 	// 意义上也更差）。因此短等待原地等：走有界的同号重试，退避不短于 Retry-After。
 	// 超过这个预算才说明账号真的进了限流窗口，此时停号 + 换号比干等划算。
-	retryAfterSameAccountWaitBudget = 5 * time.Second
+	retryAfterSameAccountWaitBudget       = 5 * time.Second
 	openAIOAuth429MaxAccountAttempts      = 3
 	openAIStopSchedulingBridgeCooldown    = 2 * time.Minute
 	openAIOAuth429StormWindow             = 10 * time.Second

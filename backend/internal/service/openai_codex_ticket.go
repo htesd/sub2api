@@ -135,6 +135,29 @@ func normalizeOpenAICodexTicketPlan(account *Account) string {
 	return "unknown"
 }
 
+// openAICodexTicketPlanKnown 判断该账号的合格长度是否有确定依据。
+// 必须与 openAICodexTicketTargetLength 同口径：账号级 extra.codex_ticket_plan
+// 覆盖也算"已知"，否则一个显式标了 team 的账号会被当成未知套餐，长度判定用 332
+// 而烧号判定却跳过，两套口径撕裂。
+func openAICodexTicketPlanKnown(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if account.Extra != nil {
+		if raw, ok := account.Extra[openAICodexTicketPlanExtraKey].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(raw)) {
+			case "pro", "team", "business":
+				return true
+			}
+		}
+	}
+	switch normalizeOpenAICodexTicketPlan(account) {
+	case "pro", "business":
+		return true
+	}
+	return false
+}
+
 // openAICodexTicketPlanEligible 判断该套餐是否可能拿到票。free 账号实测一律被
 // 上游 400 拒绝（无 astra/sol 访问权限），探测它们只是白送失败信号。
 func openAICodexTicketPlanEligible(account *Account) bool {
@@ -466,7 +489,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
-	if !s.openAICodexTicketFailClosedActive(account, cfg) {
+	if !s.openAICodexTicketFailClosedActive(cfg) {
 		return nil
 	}
 	return ErrOpenAICodexTicketUnavailable
@@ -504,24 +527,20 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 
 // openAICodexTicketFailClosedActive 判断 fail_closed 是否真的该生效。
 //
-// fail_closed 的含义是"没有合格票就拒发，宁可失败也不要降智"。但它成立的前提是
-// 票据确实拿得到。当票据的唯一来源是被动采集、而该账号的主传输又根本不产票时
-// （WSv2 路径没有 turn-state 暂存与提交点），fail_closed 就退化成"永久拒发"——
-// 把一个能正常服务的账号彻底堵死，这比降智严重得多。
+// fail_closed 的含义是"没有合格票就拒发，宁可失败也不要降智"。它成立的前提是
+// 票据有一个独立于业务请求的来源。当唯一来源是被动采集时，这个前提不成立，而且
+// 会形成自举死锁：
 //
-// 因此：只有在主动探测循环开启（票据有独立来源）时，fail_closed 才对 WS 账号生效。
-func (s *OpenAIGatewayService) openAICodexTicketFailClosedActive(account *Account, cfg config.OpenAICodexTicketConfig) bool {
-	if !cfg.FailClosed {
-		return false
-	}
-	if cfg.HarvestLoopEnabled {
-		return true
-	}
-	// 被动采集是唯一来源时，WS 账号拿不到票不是它的错，不能因此拒发。
-	if account != nil && account.IsOpenAIResponsesWebSocketV2Enabled() {
-		return false
-	}
-	return true
+//	没有票 → fail_closed 拒发请求 → 没有成功回合 → 永远拿不到票
+//
+// 这对所有账号都成立，不只是 WSv2 账号（后者更糟：WS 路径连暂存点都没有，
+// 见 openai_gateway_forward.go 的 wsResult 返回处）。因此被动采集单独工作时
+// 一律不启用 fail_closed——降智是可恢复的，永久拒发不是。
+//
+// 只有主动探测循环开启（票据有独立来源、能打破自举）时 fail_closed 才生效。
+// 注意这是账号无关的判定，不看当前 transport：HTTP 回合同样受自举死锁影响。
+func (s *OpenAIGatewayService) openAICodexTicketFailClosedActive(cfg config.OpenAICodexTicketConfig) bool {
+	return cfg.FailClosed && cfg.HarvestLoopEnabled
 }
 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
@@ -531,7 +550,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	cfg := s.openAICodexTicketConfig()
-	if !s.openAICodexTicketFailClosedActive(account, cfg) {
+	if !s.openAICodexTicketFailClosedActive(cfg) {
 		return false
 	}
 	model := normalizeOpenAICodexTicketModel(outboundModel)
@@ -807,7 +826,7 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			// 长度不符只在"该账号的合格长度是已知的"前提下才能归因到出口 IP。
 			// 未知套餐走的是配置回落值（默认 292），此时一个合法的 332 会被误判成
 			// 出口污染，进而把一个好代理错误地冷却掉。只有套餐明确时才标记。
-			if status == http.StatusOK && state != "" && normalizeOpenAICodexTicketPlan(account) != "unknown" {
+			if status == http.StatusOK && state != "" && openAICodexTicketPlanKnown(account) {
 				s.openAICodexTicketProxyBurn(proxyURL, time.Duration(cfg.HarvestProxyBurnCooldownSeconds)*time.Second, now)
 			}
 			// len 是关键诊断位：312 说明当前出口 IP 已被降智，不是网络问题。

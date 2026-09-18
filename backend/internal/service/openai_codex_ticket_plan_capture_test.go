@@ -228,30 +228,39 @@ func TestIsMaskedOpenAICodexTicketHarvestProxyPool(t *testing.T) {
 
 // —— 以下用例对应 gpt-5.6-sol 审查发现的问题 ——
 
-// fail_closed 的前提是票据拿得到。被动采集是唯一来源时，WSv2 账号根本不产票，
-// 此时 fail_closed 不能生效，否则把能正常服务的账号永久堵死。
-func TestOpenAICodexTicketFailClosedExemptsWSAccountsWhenPassiveOnly(t *testing.T) {
+// 被动采集是唯一来源时 fail_closed 会形成自举死锁：没票→拒发→没有成功回合→
+// 永远没票。所以它只在主动探测开启时生效，且与账号/transport 无关。
+func TestOpenAICodexTicketFailClosedRequiresIndependentSource(t *testing.T) {
 	svc := &OpenAIGatewayService{}
-	wsAccount := &Account{
-		ID:       1,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-		Extra:    map[string]any{"openai_oauth_responses_websockets_v2_enabled": true},
-	}
-	httpAccount := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	passiveOnly := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: false}
-	assert.False(t, svc.openAICodexTicketFailClosedActive(wsAccount, passiveOnly),
-		"WS 账号在只有被动采集时必须豁免 fail_closed")
-	assert.True(t, svc.openAICodexTicketFailClosedActive(httpAccount, passiveOnly),
-		"HTTP 账号能被动采集到票，fail_closed 照常生效")
+	assert.False(t, svc.openAICodexTicketFailClosedActive(passiveOnly),
+		"只有被动采集时 fail_closed 必须失效，否则自举死锁")
 
 	withActive := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: true}
-	assert.True(t, svc.openAICodexTicketFailClosedActive(wsAccount, withActive),
-		"主动探测开启后票据有独立来源，豁免失效")
+	assert.True(t, svc.openAICodexTicketFailClosedActive(withActive),
+		"主动探测能打破自举，此时 fail_closed 生效")
 
-	off := config.OpenAICodexTicketConfig{FailClosed: false}
-	assert.False(t, svc.openAICodexTicketFailClosedActive(httpAccount, off))
+	assert.False(t, svc.openAICodexTicketFailClosedActive(
+		config.OpenAICodexTicketConfig{FailClosed: false, HarvestLoopEnabled: true}))
+}
+
+// 烧号判定必须与长度判定同口径：账号级 codex_ticket_plan 覆盖也算套餐已知。
+func TestOpenAICodexTicketPlanKnownMatchesTargetLengthResolution(t *testing.T) {
+	cfg := config.OpenAICodexTicketConfig{TargetLength: 292}
+
+	// plan_type 未知但 extra 显式标了 team：长度判定按 332，烧号判定也必须认。
+	acc := accountWithPlan("brand_new_plan")
+	acc.Extra = map[string]any{openAICodexTicketPlanExtraKey: "team"}
+	assert.Equal(t, openAICodexTicketLengthBusiness, openAICodexTicketTargetLength(acc, cfg))
+	assert.True(t, openAICodexTicketPlanKnown(acc),
+		"extra 覆盖让长度有确定依据，两套口径不得撕裂")
+
+	assert.True(t, openAICodexTicketPlanKnown(accountWithPlan("pro")))
+	assert.True(t, openAICodexTicketPlanKnown(accountWithPlan("self_serve_business_prolite")))
+	assert.False(t, openAICodexTicketPlanKnown(accountWithPlan("brand_new_plan")),
+		"纯未知套餐走回落长度，不能据此烧代理")
+	assert.False(t, openAICodexTicketPlanKnown(nil))
 }
 
 // 长度不符只在套餐已知时才能归因到出口 IP；未知套餐走回落值，

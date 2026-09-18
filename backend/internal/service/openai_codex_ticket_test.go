@@ -49,10 +49,11 @@ func ticketTestService(t *testing.T, cfg config.OpenAICodexTicketConfig, upstrea
 func TestApplyOpenAICodexTicket_ReplacesHeader(t *testing.T) {
 	state := fakeCodexTicketState(292)
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
-		Enabled:      true,
-		TargetLength: 292,
-		TTLSeconds:   3600,
-		FailClosed:   true,
+		Enabled:            true,
+		TargetLength:       292,
+		TTLSeconds:         3600,
+		FailClosed:         true,
+		HarvestLoopEnabled: true,
 	}, nil)
 	account := ticketTestAccount(41)
 	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
@@ -74,11 +75,12 @@ func TestApplyOpenAICodexTicket_ReplacesHeader(t *testing.T) {
 
 func TestApplyOpenAICodexTicket_DoesNotReuseOtherModelOrAccount(t *testing.T) {
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
-		Enabled:         true,
-		TargetLength:    292,
-		TTLSeconds:      3600,
-		FailClosed:      true,
-		HarvestProxyURL: "socks5h://harvest",
+		Enabled:            true,
+		TargetLength:       292,
+		TTLSeconds:         3600,
+		FailClosed:         true,
+		HarvestLoopEnabled: true,
+		HarvestProxyURL:    "socks5h://harvest",
 	}, &httpUpstreamRecorder{err: io.EOF})
 	a := ticketTestAccount(41)
 	b := ticketTestAccount(42)
@@ -136,11 +138,12 @@ func TestLookupOpenAICodexTicket_PrefersNewerExtra(t *testing.T) {
 
 func TestApplyOpenAICodexTicket_ExpiredNotInjected(t *testing.T) {
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
-		Enabled:         true,
-		TargetLength:    292,
-		TTLSeconds:      3600,
-		FailClosed:      true,
-		HarvestProxyURL: "socks5h://harvest",
+		Enabled:            true,
+		TargetLength:       292,
+		TTLSeconds:         3600,
+		FailClosed:         true,
+		HarvestLoopEnabled: true,
+		HarvestProxyURL:    "socks5h://harvest",
 	}, &httpUpstreamRecorder{err: io.EOF})
 	account := ticketTestAccount(41)
 	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
@@ -159,10 +162,11 @@ func TestApplyOpenAICodexTicket_ExpiredNotInjected(t *testing.T) {
 
 func TestApplyOpenAICodexTicket_WrongLengthNotInjected(t *testing.T) {
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
-		Enabled:      true,
-		TargetLength: 292,
-		TTLSeconds:   3600,
-		FailClosed:   true,
+		Enabled:            true,
+		TargetLength:       292,
+		TTLSeconds:         3600,
+		FailClosed:         true,
+		HarvestLoopEnabled: true,
 	}, nil)
 	account := ticketTestAccount(41)
 	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
@@ -193,7 +197,7 @@ func TestApplyOpenAICodexTicket_FailOpenSkipsInject(t *testing.T) {
 }
 
 func TestApplyOpenAICodexTicket_DisabledNoop(t *testing.T) {
-	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: false, FailClosed: true}, nil)
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: false, FailClosed: true, HarvestLoopEnabled: true}, nil)
 	h := http.Header{}
 	h.Set(openAICodexTurnStateHeader, "client-state")
 	err := svc.applyOpenAICodexTicket(context.Background(), ticketTestAccount(41), "gpt-6-astra", h)
@@ -229,6 +233,7 @@ func TestHarvestOpenAICodexTicket_StopsAt292AndUsesHarvestProxy(t *testing.T) {
 		HarvestProxyURL:              "socks5h://user:pass@harvest.example:31",
 		HarvestAttemptTimeoutSeconds: 5,
 		FailClosed:                   true,
+		HarvestLoopEnabled:           true,
 	}, upstream)
 	account := ticketTestAccount(41)
 
@@ -274,6 +279,7 @@ func TestHarvestOpenAICodexTicket_HTTP503DoesNotAbortHunt(t *testing.T) {
 		HarvestProxyURL:              "socks5h://harvest.example:31",
 		HarvestAttemptTimeoutSeconds: 5,
 		FailClosed:                   true,
+		HarvestLoopEnabled:           true,
 	}, upstream)
 	account := ticketTestAccount(41)
 	svc.probeOnceOpenAICodexTicket(context.Background(), account, "gpt-6-astra")
@@ -432,11 +438,12 @@ func TestOpenAICodexTicketGate_CompactRequestUsesForwardOutboundModel(t *testing
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
 		OpenAICompactModel: "gpt-5.5",
 		OpenAICodexTicket: config.OpenAICodexTicketConfig{
-			Enabled:      true,
-			TargetLength: 292,
-			TTLSeconds:   3600,
-			FailClosed:   true,
-			Models:       []string{"gpt-6-astra"},
+			Enabled:            true,
+			TargetLength:       292,
+			TTLSeconds:         3600,
+			FailClosed:         true,
+			HarvestLoopEnabled: true,
+			Models:             []string{"gpt-6-astra"},
 		},
 	}}}
 	account := ticketTestAccount(41) // 无票
