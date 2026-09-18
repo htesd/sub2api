@@ -1,11 +1,15 @@
 package service
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 func accountWithPlan(plan string) *Account {
@@ -177,4 +181,47 @@ func TestOpenAICodexTicketAccountRecentlyUsed(t *testing.T) {
 	unlimited := config.OpenAICodexTicketConfig{HarvestActiveWindowSeconds: -1}
 	assert.True(t, openAICodexTicketAccountRecentlyUsed(&Account{LastUsedAt: &stale}, unlimited, now),
 		"窗口 <=0 表示不限制")
+}
+
+// —— 以下用例对应 kimi 审查发现的问题，逐条锁住回归 ——
+
+// P1：候选必须绑定铸造账号，否则 failover 换号后 A 号的 state 会落到 B 号名下。
+func TestOpenAICodexTicketCandidateBoundToAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	accA := &Account{ID: 11}
+	accB := &Account{ID: 22}
+	state := makeTurnState(openAICodexTicketFernetVersion, time.Now(), 210)
+
+	stageOpenAICodexTicketCandidate(c, accA, state)
+	assert.Equal(t, state, stagedOpenAICodexTicketCandidate(c, accA), "同号必须取到")
+	assert.Empty(t, stagedOpenAICodexTicketCandidate(c, accB),
+		"换号后不得取到上一个账号铸造的 state")
+}
+
+// P1：空 state 必须清掉上一个 attempt 的候选。
+func TestOpenAICodexTicketCandidateClearedOnEmptyState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	acc := &Account{ID: 11}
+
+	stageOpenAICodexTicketCandidate(c, acc, makeTurnState(openAICodexTicketFernetVersion, time.Now(), 210))
+	require.NotEmpty(t, stagedOpenAICodexTicketCandidate(c, acc))
+
+	stageOpenAICodexTicketCandidate(c, acc, "")
+	assert.Empty(t, stagedOpenAICodexTicketCandidate(c, acc),
+		"本 attempt 无 turn-state 时必须清除候选，否则会复用上一个 attempt 的")
+}
+
+// P2：代理池的掩码回显判定——任一成员是掩码就保留旧值。
+func TestIsMaskedOpenAICodexTicketHarvestProxyPool(t *testing.T) {
+	assert.True(t, IsMaskedOpenAICodexTicketHarvestProxyPool(""), "空串保留旧值")
+	assert.True(t, IsMaskedOpenAICodexTicketHarvestProxyPool("http://u:***@a.example:1080"))
+	assert.True(t,
+		IsMaskedOpenAICodexTicketHarvestProxyPool("http://u:real@a.example:1080,http://u:***@b.example:1080"),
+		"半真半掩无法可靠合并，必须整体保留旧值")
+	assert.False(t,
+		IsMaskedOpenAICodexTicketHarvestProxyPool("http://u:real@a.example:1080,http://u2:real2@b.example:1080"),
+		"全是真凭据时才写入")
 }

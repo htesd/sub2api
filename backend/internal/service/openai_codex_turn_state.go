@@ -53,6 +53,8 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 	state := extractOpenAICodexTurnState(upstream)
 	if state == "" {
 		c.Writer.Header().Del(canonical)
+		// 同时清掉上一个 attempt 的候选，避免 failover 后旧号的 state 被误用。
+		stageOpenAICodexTicketCandidate(c, account, "")
 		return
 	}
 	c.Writer.Header().Set(canonical, state)
@@ -60,7 +62,7 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 	s.noteOpenAICodexTurnStateProvenance(c, account)
 	// 被动采集：暂存候选，等请求结束确认本回合没被降级后再落库
 	// （见 CommitOpenAICodexTicketFromResponse）。
-	stageOpenAICodexTicketCandidate(c, state)
+	stageOpenAICodexTicketCandidate(c, account, state)
 }
 
 // stageOpenAICodexTurnState 将上游 turn-state 暂存到延迟提交的响应头集合
@@ -91,10 +93,16 @@ func stageOpenAICodexTurnState(dst *http.Header, upstream http.Header) {
 // 值一致（否则被 failover 丢弃的 attempt 会污染溯源，导致后续误剥离）。
 func (s *OpenAIGatewayService) noteStagedOpenAICodexTurnStateCommitted(c *gin.Context, account *Account, staged http.Header) {
 	if staged == nil || strings.TrimSpace(staged.Get(openAICodexTurnStateHeader)) == "" {
+		// 本 attempt 没有 turn-state：清掉上一个 attempt 的候选。
+		stageOpenAICodexTicketCandidate(c, account, "")
 		return
 	}
 	noteCodexCapacityTurnState(c, account, staged.Get(openAICodexTurnStateHeader))
 	s.noteOpenAICodexTurnStateProvenance(c, account)
+	// 被动采集的真正暂存点。OpenAI 流式主路径（stageFirstOutput 恒为 true）走
+	// 暂存头 + 本提交点，不经 relayOpenAICodexTurnState——只挂在 relay 上会让
+	// 真实 Codex 流量一张票都产不出来。这里已是"获胜 attempt"语义，最适合暂存。
+	stageOpenAICodexTicketCandidate(c, account, staged.Get(openAICodexTurnStateHeader))
 }
 
 func extractOpenAICodexTurnState(upstream http.Header) string {

@@ -370,9 +370,11 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 		return nil
 	}
 	key := openAICodexTicketKey(account.ID, model)
-	targetLen := 292
+	// 按账号套餐取合格长度。用 pro 的 292 去校验 business 的 332 票会把有效票
+	// 判为无效，在 mem-only 场景（UpdateExtra 失败）下还会顺手把它删掉。
+	targetLen := openAICodexTicketLengthPro
 	if s != nil {
-		targetLen = s.openAICodexTicketConfig().TargetLength
+		targetLen = openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())
 	}
 	now := time.Now()
 	var mem *openAICodexTicket
@@ -896,6 +898,14 @@ type openAICodexTicketProxyBurnState struct {
 // openAICodexTicketCandidateContextKey 暂存本次请求从上游响应头里看到的 turn-state。
 const openAICodexTicketCandidateContextKey = "openai_codex_ticket_candidate"
 
+// openAICodexTicketCandidate 候选必须绑定铸造账号。failover 时同一个 gin.Context
+// 会被复用于多个账号的 attempt，裸 string 会让 A 号铸造的 state 落到 B 号名下——
+// 这正是 guardOpenAICodexTurnStateEcho 存在的同一个坑。
+type openAICodexTicketCandidate struct {
+	accountID int64
+	state     string
+}
+
 // openAICodexTicketPassiveCaptureEnabled 被动采集默认开启。
 func (s *OpenAIGatewayService) openAICodexTicketPassiveCaptureEnabled() bool {
 	cfg := s.openAICodexTicketConfig()
@@ -909,23 +919,37 @@ func (s *OpenAIGatewayService) openAICodexTicketPassiveCaptureEnabled() bool {
 //
 // 此刻还不能落库：上游实际响应的模型要等流式响应读完才知道，而一张从"已被降级
 // 的回合"里拿到的 state 正是我们要拒绝的东西。所以先暂存，等 commit 时校验。
-func stageOpenAICodexTicketCandidate(c *gin.Context, state string) {
-	if c == nil || strings.TrimSpace(state) == "" {
+// 无条件覆盖：state 为空时必须清除上一个 attempt 留下的候选，否则 failover
+// 换号后旧账号的 state 会被当成新账号的票。
+func stageOpenAICodexTicketCandidate(c *gin.Context, account *Account, state string) {
+	if c == nil {
 		return
 	}
-	c.Set(openAICodexTicketCandidateContextKey, state)
+	state = strings.TrimSpace(state)
+	if state == "" || account == nil || account.ID <= 0 {
+		c.Set(openAICodexTicketCandidateContextKey, (*openAICodexTicketCandidate)(nil))
+		return
+	}
+	c.Set(openAICodexTicketCandidateContextKey, &openAICodexTicketCandidate{
+		accountID: account.ID,
+		state:     state,
+	})
 }
 
-func stagedOpenAICodexTicketCandidate(c *gin.Context) string {
-	if c == nil {
+// stagedOpenAICodexTicketCandidate 只在候选确实由 account 铸造时返回 state。
+func stagedOpenAICodexTicketCandidate(c *gin.Context, account *Account) string {
+	if c == nil || account == nil {
 		return ""
 	}
 	raw, ok := c.Get(openAICodexTicketCandidateContextKey)
 	if !ok {
 		return ""
 	}
-	state, _ := raw.(string)
-	return strings.TrimSpace(state)
+	candidate, _ := raw.(*openAICodexTicketCandidate)
+	if candidate == nil || candidate.accountID != account.ID {
+		return ""
+	}
+	return strings.TrimSpace(candidate.state)
 }
 
 // CommitOpenAICodexTicketFromResponse 被动采集的落库点：请求完成后，若本次上游
@@ -953,7 +977,7 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if model == "" || !s.openAICodexTicketGatedModel(model) {
 		return
 	}
-	state := stagedOpenAICodexTicketCandidate(c)
+	state := stagedOpenAICodexTicketCandidate(c, account)
 	if state == "" {
 		return
 	}
@@ -986,7 +1010,9 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if existing != nil && existing.valid(now, wantLen) && existing.IssuedAt.After(issuedAt) {
 		return
 	}
-	s.storeOpenAICodexTicket(ctx, account, ticket)
+	// 客户端拿到终止事件后立刻断开是常态，此时 Forward 的 ctx 已 cancel，
+	// UpdateExtra 必然失败。落库与请求生命周期解绑。
+	s.storeOpenAICodexTicket(context.WithoutCancel(ctx), account, ticket)
 	s.clearOpenAICodexTicketBackoff(openAICodexTicketKey(account.ID, model))
 	logger.L().Info("openai_codex_ticket captured passively",
 		zap.Int64("account_id", account.ID), zap.String("model", model),
@@ -1128,6 +1154,22 @@ func ValidateOpenAICodexTicketHarvestProxyPool(raw string) error {
 		}
 	}
 	return nil
+}
+
+// IsMaskedOpenAICodexTicketHarvestProxyPool 判断提交上来的池串是否为掩码回显。
+// 空串视为掩码（保留旧值），任一成员是掩码即整体判为掩码——半真半掩的提交无法
+// 可靠合并，保留旧值比存进一个带 *** 的假密码安全。
+func IsMaskedOpenAICodexTicketHarvestProxyPool(raw string) bool {
+	pool := SplitOpenAICodexTicketHarvestProxyPool(raw)
+	if len(pool) == 0 {
+		return true
+	}
+	for _, item := range pool {
+		if IsMaskedProxyURL(item) {
+			return true
+		}
+	}
+	return false
 }
 
 // MaskOpenAICodexTicketHarvestProxyPool 掩码整个池，保持分隔形式便于管理端回显。
