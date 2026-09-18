@@ -329,7 +329,11 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 			exp := ticket.ExpiresAt
 			status.ExpiresAt = &exp
 		}
-		status.Blocked = cfg.FailClosed && !status.Ready
+		// 与运行时同源：被动采集模式、无票源、idle、free 套餐等情况下运行时会
+		// 放行，管理端不能还显示"已暂停"。proxyConfigured 用配置值近似——纯函数
+		// 拿不到后台设置，宁可显示未阻断（与运行时的放行方向一致）。
+		status.Blocked = !status.Ready && openAICodexTicketFailClosedEffective(
+			account, cfg, strings.TrimSpace(cfg.HarvestProxyURL) != "", now)
 		out = append(out, status)
 	}
 	return out
@@ -489,7 +493,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
-	if !s.openAICodexTicketFailClosedActive(cfg) {
+	if !s.openAICodexTicketFailClosedActive(account, cfg) {
 		return nil
 	}
 	return ErrOpenAICodexTicketUnavailable
@@ -525,22 +529,50 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 	return model
 }
 
-// openAICodexTicketFailClosedActive 判断 fail_closed 是否真的该生效。
+// openAICodexTicketFailClosedEffective 判断 fail_closed 对该账号是否真的该生效。
 //
-// fail_closed 的含义是"没有合格票就拒发，宁可失败也不要降智"。它成立的前提是
-// 票据有一个独立于业务请求的来源。当唯一来源是被动采集时，这个前提不成立，而且
-// 会形成自举死锁：
+// fail_closed 的含义是"没有合格票就拒发，宁可失败也不要降智"。它唯一的成立前提是
+// **这个账号确实会被一个可用的票源探测到**。任何时候前提不成立，fail_closed 就退化
+// 成自举死锁：
 //
-//	没有票 → fail_closed 拒发请求 → 没有成功回合 → 永远拿不到票
+//	没有票 → 拒发请求 → 没有成功回合 → last_used_at 不更新 → 永远拿不到票
 //
-// 这对所有账号都成立，不只是 WSv2 账号（后者更糟：WS 路径连暂存点都没有，
-// 见 openai_gateway_forward.go 的 wsResult 返回处）。因此被动采集单独工作时
-// 一律不启用 fail_closed——降智是可恢复的，永久拒发不是。
+// 死锁有四个入口，全部要挡住：
+//  1. 只有被动采集（harvest_loop_enabled=false）：票只能来自成功回合，拒发即死锁
+//  2. 主动循环开着但没配采集代理：probeOnce 直接返回，循环永远产不出票
+//  3. 账号在活跃窗口外或从未使用：主动循环按 idle 跳过它，而拒发让它永远无法变活跃
+//  4. free 套餐：上游一律 400，无论探测多少次都拿不到票
 //
-// 只有主动探测循环开启（票据有独立来源、能打破自举）时 fail_closed 才生效。
-// 注意这是账号无关的判定，不看当前 transport：HTTP 回合同样受自举死锁影响。
-func (s *OpenAIGatewayService) openAICodexTicketFailClosedActive(cfg config.OpenAICodexTicketConfig) bool {
-	return cfg.FailClosed && cfg.HarvestLoopEnabled
+// 降智是可恢复的，永久拒发不是。所以这四种情况一律放行。
+func openAICodexTicketFailClosedEffective(account *Account, cfg config.OpenAICodexTicketConfig, proxyConfigured bool, now time.Time) bool {
+	if !cfg.FailClosed {
+		return false
+	}
+	// 入口 1：被动采集是唯一来源。
+	if !cfg.HarvestLoopEnabled {
+		return false
+	}
+	// 入口 2：没有可用票源。这里只能判"是否配置"，代理运行时不可用无法在此判定，
+	// 但至少不能把空代理当成独立来源。
+	if !proxyConfigured {
+		return false
+	}
+	// 入口 4：free 套餐永远拿不到票。
+	if !openAICodexTicketPlanEligible(account) {
+		return false
+	}
+	// 入口 3：主动循环不会探测它。判定必须与 refreshOpenAICodexTickets 的准入同源。
+	if !openAICodexTicketAccountRecentlyUsed(account, cfg, now) {
+		return false
+	}
+	return true
+}
+
+// openAICodexTicketFailClosedActive 是 openAICodexTicketFailClosedEffective 的
+// 服务侧封装，补上"采集代理是否配置"这一维。
+func (s *OpenAIGatewayService) openAICodexTicketFailClosedActive(account *Account, cfg config.OpenAICodexTicketConfig) bool {
+	proxyConfigured := len(SplitOpenAICodexTicketHarvestProxyPool(s.openAICodexTicketHarvestProxyURL())) > 0
+	return openAICodexTicketFailClosedEffective(account, cfg, proxyConfigured, time.Now())
 }
 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
@@ -550,7 +582,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	cfg := s.openAICodexTicketConfig()
-	if !s.openAICodexTicketFailClosedActive(cfg) {
+	if !s.openAICodexTicketFailClosedActive(account, cfg) {
 		return false
 	}
 	model := normalizeOpenAICodexTicketModel(outboundModel)

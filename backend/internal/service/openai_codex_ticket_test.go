@@ -167,6 +167,8 @@ func TestApplyOpenAICodexTicket_WrongLengthNotInjected(t *testing.T) {
 		TTLSeconds:         3600,
 		FailClosed:         true,
 		HarvestLoopEnabled: true,
+		// fail_closed 生效需要存在票源（见 openAICodexTicketFailClosedEffective）
+		HarvestProxyURL: "socks5h://harvest",
 	}, nil)
 	account := ticketTestAccount(41)
 	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
@@ -409,8 +411,15 @@ func TestOpenAICodexTicketStatuses_RespectRuntimeConfiguration(t *testing.T) {
 	require.Len(t, status, 1)
 	require.Equal(t, "custom-model", status[0].Model)
 	require.False(t, status[0].Blocked)
+	// fail_closed 单独不再足以阻断：还需要存在独立票源，否则是自举死锁
+	// （见 openAICodexTicketFailClosedEffective）。
 	cfg.FailClosed = true
-	require.True(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Blocked)
+	require.False(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Blocked,
+		"只有 fail_closed 而无票源时运行时会放行，状态也必须如实显示未阻断")
+	cfg.HarvestLoopEnabled = true
+	cfg.HarvestProxyURL = "socks5h://harvest"
+	require.True(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Blocked,
+		"票源具备后，无票即阻断")
 }
 func TestProbeOpenAICodexTicket_RejectsInvalidState(t *testing.T) {
 	for _, state := range []string{fakeCodexTicketState(312), strings.Repeat("X", 292), ""} {
@@ -443,6 +452,7 @@ func TestOpenAICodexTicketGate_CompactRequestUsesForwardOutboundModel(t *testing
 			TTLSeconds:         3600,
 			FailClosed:         true,
 			HarvestLoopEnabled: true,
+			HarvestProxyURL:    "socks5h://harvest",
 			Models:             []string{"gpt-6-astra"},
 		},
 	}}}

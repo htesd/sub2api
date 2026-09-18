@@ -228,21 +228,79 @@ func TestIsMaskedOpenAICodexTicketHarvestProxyPool(t *testing.T) {
 
 // —— 以下用例对应 gpt-5.6-sol 审查发现的问题 ——
 
-// 被动采集是唯一来源时 fail_closed 会形成自举死锁：没票→拒发→没有成功回合→
-// 永远没票。所以它只在主动探测开启时生效，且与账号/transport 无关。
-func TestOpenAICodexTicketFailClosedRequiresIndependentSource(t *testing.T) {
-	svc := &OpenAIGatewayService{}
+// fail_closed 的四个自举死锁入口必须全部挡住：只有被动采集、无票源、
+// 账号在活跃窗口外、free 套餐——任一成立就必须放行，否则账号被永久拒发。
+func TestOpenAICodexTicketFailClosedGuardsAllBootstrapDeadlocks(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Minute)
+	stale := now.Add(-48 * time.Hour)
 
-	passiveOnly := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: false}
-	assert.False(t, svc.openAICodexTicketFailClosedActive(passiveOnly),
-		"只有被动采集时 fail_closed 必须失效，否则自举死锁")
+	base := config.OpenAICodexTicketConfig{
+		FailClosed:                 true,
+		HarvestLoopEnabled:         true,
+		HarvestActiveWindowSeconds: 86400,
+	}
+	activePro := func() *Account {
+		a := accountWithPlan("pro")
+		a.LastUsedAt = &recent
+		return a
+	}
 
-	withActive := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: true}
-	assert.True(t, svc.openAICodexTicketFailClosedActive(withActive),
-		"主动探测能打破自举，此时 fail_closed 生效")
+	assert.True(t, openAICodexTicketFailClosedEffective(activePro(), base, true, now),
+		"票源可用 + 账号活跃 + 套餐合格：fail_closed 应生效")
 
-	assert.False(t, svc.openAICodexTicketFailClosedActive(
-		config.OpenAICodexTicketConfig{FailClosed: false, HarvestLoopEnabled: true}))
+	assert.False(t, openAICodexTicketFailClosedEffective(activePro(),
+		config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: false}, true, now),
+		"入口1：只有被动采集时，拒发会掐死唯一的票据来源")
+
+	assert.False(t, openAICodexTicketFailClosedEffective(activePro(), base, false, now),
+		"入口2：没配采集代理时 probeOnce 直接返回，循环永远产不出票")
+
+	idle := accountWithPlan("pro")
+	idle.LastUsedAt = &stale
+	assert.False(t, openAICodexTicketFailClosedEffective(idle, base, true, now),
+		"入口3：主动循环按 idle 跳过它，而拒发让它永远无法变活跃")
+
+	never := accountWithPlan("pro")
+	assert.False(t, openAICodexTicketFailClosedEffective(never, base, true, now),
+		"入口3：从未使用过的新账号同理")
+
+	free := accountWithPlan("free")
+	free.LastUsedAt = &recent
+	assert.False(t, openAICodexTicketFailClosedEffective(free, base, true, now),
+		"入口4：free 套餐被上游一律 400，探测多少次都拿不到票")
+
+	assert.False(t, openAICodexTicketFailClosedEffective(activePro(),
+		config.OpenAICodexTicketConfig{FailClosed: false, HarvestLoopEnabled: true}, true, now))
+}
+
+// 管理端展示的 Blocked 必须与运行时同源，不能运行时放行而 UI 显示"已暂停"。
+func TestOpenAICodexTicketStatusesBlockedMatchesRuntime(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Minute)
+	account := accountWithPlan("pro")
+	account.ID = 7
+	account.Platform = PlatformOpenAI
+	account.Type = AccountTypeOAuth
+	account.LastUsedAt = &recent
+
+	passiveOnly := config.OpenAICodexTicketConfig{
+		Enabled: true, FailClosed: true, HarvestLoopEnabled: false,
+		Models: []string{"gpt-6-astra"},
+	}
+	for _, st := range OpenAICodexTicketStatuses(account, passiveOnly, now) {
+		assert.False(t, st.Blocked,
+			"被动采集模式下运行时放行，管理端不得显示已暂停")
+	}
+
+	withSource := config.OpenAICodexTicketConfig{
+		Enabled: true, FailClosed: true, HarvestLoopEnabled: true,
+		HarvestProxyURL: "http://proxy.example:1080", HarvestActiveWindowSeconds: 86400,
+		Models: []string{"gpt-6-astra"},
+	}
+	for _, st := range OpenAICodexTicketStatuses(account, withSource, now) {
+		assert.True(t, st.Blocked, "票源可用且账号活跃时，无票即阻断，UI 应如实显示")
+	}
 }
 
 // 烧号判定必须与长度判定同口径：账号级 codex_ticket_plan 覆盖也算套餐已知。

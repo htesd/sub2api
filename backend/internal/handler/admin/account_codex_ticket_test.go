@@ -17,7 +17,13 @@ func TestAccountResponseCodexTicketsUsesConfiguredPolicy(t *testing.T) {
 	require.Len(t, status, 1)
 	require.Equal(t, "configured-model", status[0].Model)
 	require.False(t, status[0].Blocked)
+	// fail_closed 单独不再足以阻断：还需要存在独立票源（主动探测循环 + 采集代理），
+	// 否则是自举死锁，运行时会放行，展示层必须与之一致。
 	h.cfg.Gateway.OpenAICodexTicket.FailClosed = true
+	require.False(t, h.accountResponseFromService(account).CodexTurnTickets[0].Blocked)
+	h.cfg.Gateway.OpenAICodexTicket.HarvestLoopEnabled = true
+	h.cfg.Gateway.OpenAICodexTicket.HarvestProxyURL = "socks5h://harvest"
+	h.cfg.Gateway.OpenAICodexTicket.HarvestActiveWindowSeconds = -1
 	require.True(t, h.accountResponseFromService(account).CodexTurnTickets[0].Blocked)
 }
 
