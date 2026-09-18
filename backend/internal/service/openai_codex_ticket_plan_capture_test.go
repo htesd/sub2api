@@ -225,3 +225,40 @@ func TestIsMaskedOpenAICodexTicketHarvestProxyPool(t *testing.T) {
 		IsMaskedOpenAICodexTicketHarvestProxyPool("http://u:real@a.example:1080,http://u2:real2@b.example:1080"),
 		"全是真凭据时才写入")
 }
+
+// —— 以下用例对应 gpt-5.6-sol 审查发现的问题 ——
+
+// fail_closed 的前提是票据拿得到。被动采集是唯一来源时，WSv2 账号根本不产票，
+// 此时 fail_closed 不能生效，否则把能正常服务的账号永久堵死。
+func TestOpenAICodexTicketFailClosedExemptsWSAccountsWhenPassiveOnly(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	wsAccount := &Account{
+		ID:       1,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra:    map[string]any{"openai_oauth_responses_websockets_v2_enabled": true},
+	}
+	httpAccount := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	passiveOnly := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: false}
+	assert.False(t, svc.openAICodexTicketFailClosedActive(wsAccount, passiveOnly),
+		"WS 账号在只有被动采集时必须豁免 fail_closed")
+	assert.True(t, svc.openAICodexTicketFailClosedActive(httpAccount, passiveOnly),
+		"HTTP 账号能被动采集到票，fail_closed 照常生效")
+
+	withActive := config.OpenAICodexTicketConfig{FailClosed: true, HarvestLoopEnabled: true}
+	assert.True(t, svc.openAICodexTicketFailClosedActive(wsAccount, withActive),
+		"主动探测开启后票据有独立来源，豁免失效")
+
+	off := config.OpenAICodexTicketConfig{FailClosed: false}
+	assert.False(t, svc.openAICodexTicketFailClosedActive(httpAccount, off))
+}
+
+// 长度不符只在套餐已知时才能归因到出口 IP；未知套餐走回落值，
+// 一个合法的 332 会把好代理误判成污染。
+func TestOpenAICodexTicketProxyBurnRequiresKnownPlan(t *testing.T) {
+	assert.Equal(t, "unknown", normalizeOpenAICodexTicketPlan(accountWithPlan("brand_new_plan")),
+		"未知套餐必须可识别，烧号判定要据此跳过")
+	assert.NotEqual(t, "unknown", normalizeOpenAICodexTicketPlan(accountWithPlan("pro")))
+	assert.NotEqual(t, "unknown", normalizeOpenAICodexTicketPlan(accountWithPlan("self_serve_business_prolite")))
+}

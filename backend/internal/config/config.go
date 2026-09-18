@@ -1258,7 +1258,9 @@ type OpenAICodexTicketConfig struct {
 	// （原实现的 mode=continuous），既烧采集 IP 又给上游持续失败信号。
 	HarvestBackoffBaseSeconds int `mapstructure:"harvest_backoff_base_seconds"`
 	HarvestBackoffMaxSeconds  int `mapstructure:"harvest_backoff_max_seconds"`
-	// HarvestActiveWindowSeconds 只给该窗口内跑过流量的账号打票（按
+	// HarvestActiveWindowSeconds 仅约束主动探测循环（harvest_loop_enabled），
+	// 不影响被动采集——后者跟着真实流量走，天然只覆盖在跑的账号。
+	// 只给该窗口内跑过流量的账号打票（按
 	// accounts.last_used_at 判定）。票据要消耗一发真实请求与一次干净出口 IP 的
 	// 窗口期，给闲置账号预打票是纯浪费。
 	// 取值 0（未配置）会被归一成默认 86400 秒；要关闭该过滤请显式设为负数。

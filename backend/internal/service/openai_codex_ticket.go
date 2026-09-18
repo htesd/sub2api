@@ -466,7 +466,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
-	if !cfg.FailClosed {
+	if !s.openAICodexTicketFailClosedActive(account, cfg) {
 		return nil
 	}
 	return ErrOpenAICodexTicketUnavailable
@@ -502,6 +502,28 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 	return model
 }
 
+// openAICodexTicketFailClosedActive 判断 fail_closed 是否真的该生效。
+//
+// fail_closed 的含义是"没有合格票就拒发，宁可失败也不要降智"。但它成立的前提是
+// 票据确实拿得到。当票据的唯一来源是被动采集、而该账号的主传输又根本不产票时
+// （WSv2 路径没有 turn-state 暂存与提交点），fail_closed 就退化成"永久拒发"——
+// 把一个能正常服务的账号彻底堵死，这比降智严重得多。
+//
+// 因此：只有在主动探测循环开启（票据有独立来源）时，fail_closed 才对 WS 账号生效。
+func (s *OpenAIGatewayService) openAICodexTicketFailClosedActive(account *Account, cfg config.OpenAICodexTicketConfig) bool {
+	if !cfg.FailClosed {
+		return false
+	}
+	if cfg.HarvestLoopEnabled {
+		return true
+	}
+	// 被动采集是唯一来源时，WS 账号拿不到票不是它的错，不能因此拒发。
+	if account != nil && account.IsOpenAIResponsesWebSocketV2Enabled() {
+		return false
+	}
+	return true
+}
+
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
 // 不是客户端原始模型：注入侧读的是出站 body.model，两侧口径必须一致。
 func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string) bool {
@@ -509,7 +531,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	cfg := s.openAICodexTicketConfig()
-	if !cfg.FailClosed {
+	if !s.openAICodexTicketFailClosedActive(account, cfg) {
 		return false
 	}
 	model := normalizeOpenAICodexTicketModel(outboundModel)
@@ -782,9 +804,10 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 		if status != http.StatusOK || state == "" || len(state) != wantLen || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 			now := time.Now()
 			s.noteOpenAICodexTicketProbeFailure(key, cfg, now)
-			// 拿到了响应但长度不对（典型是 312）说明这个出口 IP 已被降智，不是账号
-			// 问题，也不是网络问题——把该代理按冷却时长标记，本轮后续探测换出口。
-			if status == http.StatusOK && state != "" {
+			// 长度不符只在"该账号的合格长度是已知的"前提下才能归因到出口 IP。
+			// 未知套餐走的是配置回落值（默认 292），此时一个合法的 332 会被误判成
+			// 出口污染，进而把一个好代理错误地冷却掉。只有套餐明确时才标记。
+			if status == http.StatusOK && state != "" && normalizeOpenAICodexTicketPlan(account) != "unknown" {
 				s.openAICodexTicketProxyBurn(proxyURL, time.Duration(cfg.HarvestProxyBurnCooldownSeconds)*time.Second, now)
 			}
 			// len 是关键诊断位：312 说明当前出口 IP 已被降智，不是网络问题。
@@ -961,6 +984,12 @@ func stagedOpenAICodexTicketCandidate(c *gin.Context, account *Account) string {
 // 两者不一致说明这一回合已被降级（实测 gpt-6-astra → gpt-5.6-luna），此时的
 // state 不能留。
 func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.Context, c *gin.Context, account *Account, outboundModel, responseModel string) {
+	// 响应模型观测器在 Forward 开头创建、跨 compact fallback 与 attempt 共用。
+	// 一旦它看到过互相冲突的模型声明，这次聚合结果就不足以证明"本回合未被降级"，
+	// 宁可不留票。
+	if observedUpstreamResponseModelConflict(c) {
+		return
+	}
 	if s == nil || c == nil || account == nil {
 		return
 	}
@@ -994,6 +1023,17 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if !strings.EqualFold(strings.TrimSpace(responseModel), model) {
 		return
 	}
+	// check-then-store 必须串行化：两个同账号同模型的并发请求可能各自读到旧票，
+	// 然后用较旧的 issued_at 覆盖较新的。复用采集用的 singleflight 组按 key 收敛。
+	key := openAICodexTicketKey(account.ID, model)
+	_, _, _ = s.openaiCodexTicketFlight.Do("commit\x00"+key, func() (any, error) {
+		s.commitOpenAICodexTicketLocked(ctx, account, model, state, cfg)
+		return nil, nil
+	})
+}
+
+func (s *OpenAIGatewayService) commitOpenAICodexTicketLocked(ctx context.Context, account *Account, model, state string, cfg config.OpenAICodexTicketConfig) {
+	wantLen := openAICodexTicketTargetLength(account, cfg)
 	now := time.Now()
 	ttl := time.Duration(cfg.TTLSeconds) * time.Second
 	issuedAt := resolveOpenAICodexTicketIssuedAt(state, now, ttl, account.ID, model)

@@ -355,6 +355,9 @@ gateway:
     harvest_active_window_seconds: 86400
     # 代理返回非合格长度后的冷却时长。
     harvest_proxy_burn_cooldown_seconds: 600
+    # fail_closed 的前提是票据拿得到。被动采集是唯一来源时，WSv2 账号根本不产票，
+    # 此时 fail_closed 会退化成永久拒发——代码里对 WS 账号自动豁免（见
+    # openAICodexTicketFailClosedActive）。开启主动探测后该豁免失效。
     fail_closed: true
     models:
       - gpt-6-astra
