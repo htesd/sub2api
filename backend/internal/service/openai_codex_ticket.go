@@ -234,6 +234,16 @@ func (s *OpenAIGatewayService) openAICodexTicketConfig() config.OpenAICodexTicke
 	if s != nil && s.cfg != nil {
 		cfg = s.cfg.Gateway.OpenAICodexTicket
 	}
+	return NormalizeOpenAICodexTicketConfig(cfg)
+}
+
+// NormalizeOpenAICodexTicketConfig 补齐默认值。
+//
+// 必须导出并在所有消费点共用：运行时与管理端展示若各自拿原始配置，
+// 归一化差异会直接变成"运行时放行但 UI 显示已暂停"这类矛盾。典型的坑是
+// harvest_active_window_seconds——原始值 0 会被 openAICodexTicketAccountRecentlyUsed
+// 当成"不限制"，而运行时其实把它归一成了 86400。
+func NormalizeOpenAICodexTicketConfig(cfg config.OpenAICodexTicketConfig) config.OpenAICodexTicketConfig {
 	if cfg.TargetLength <= 0 {
 		cfg.TargetLength = 292
 	}
@@ -300,6 +310,10 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 	if !cfg.Enabled || !isOpenAICodexTicketAccount(account) {
 		return nil
 	}
+	// 与运行时同一套归一化，否则默认配置（未填 harvest_active_window_seconds）下
+	// 展示层会把 0 当成"不限制"，而运行时按 86400 判定，两边对 idle 账号给出
+	// 相反的结论。
+	cfg = NormalizeOpenAICodexTicketConfig(cfg)
 	models, targetLen := cfg.Models, openAICodexTicketTargetLength(account, cfg)
 	if len(models) == 0 {
 		models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}

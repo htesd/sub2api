@@ -157,3 +157,6 @@ output/
 .vite/
 # 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
 /plugins/
+
+# Go 构建临时目录（GOTMPDIR），不得入库
+backend/.gotmp/

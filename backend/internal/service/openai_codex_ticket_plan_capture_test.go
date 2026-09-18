@@ -329,3 +329,56 @@ func TestOpenAICodexTicketProxyBurnRequiresKnownPlan(t *testing.T) {
 	assert.NotEqual(t, "unknown", normalizeOpenAICodexTicketPlan(accountWithPlan("pro")))
 	assert.NotEqual(t, "unknown", normalizeOpenAICodexTicketPlan(accountWithPlan("self_serve_business_prolite")))
 }
+
+// 展示层与运行时必须用同一套配置归一化。默认配置（未填
+// harvest_active_window_seconds）下原始值 0 会被 recentlyUsed 当成"不限制"，
+// 而运行时归一成 86400——两边对 idle 账号会给出相反结论。
+func TestOpenAICodexTicketStatusesNormalizesConfigLikeRuntime(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-48 * time.Hour)
+	account := accountWithPlan("pro")
+	account.ID = 9
+	account.Platform = PlatformOpenAI
+	account.Type = AccountTypeOAuth
+	account.LastUsedAt = &stale
+
+	// 注意：不显式设置 HarvestActiveWindowSeconds，模拟真实默认路径。
+	raw := config.OpenAICodexTicketConfig{
+		Enabled: true, FailClosed: true, HarvestLoopEnabled: true,
+		HarvestProxyURL: "socks5h://harvest",
+		Models:          []string{"gpt-6-astra"},
+	}
+	for _, st := range OpenAICodexTicketStatuses(account, raw, now) {
+		assert.False(t, st.Blocked,
+			"idle 账号运行时会放行（主动循环按 idle 跳过它），展示层必须一致")
+	}
+}
+
+func TestNormalizeOpenAICodexTicketConfigFillsDefaults(t *testing.T) {
+	cfg := NormalizeOpenAICodexTicketConfig(config.OpenAICodexTicketConfig{})
+	assert.Equal(t, defaultOpenAICodexTicketActiveWindowSeconds, cfg.HarvestActiveWindowSeconds,
+		"0 必须归一成默认窗口，而不是被当成不限制")
+	assert.Equal(t, openAICodexTicketLengthPro, cfg.TargetLength)
+	assert.Equal(t, defaultOpenAICodexTicketHarvestConcurrency, cfg.HarvestConcurrency)
+	assert.NotEmpty(t, cfg.Models)
+
+	keep := NormalizeOpenAICodexTicketConfig(config.OpenAICodexTicketConfig{HarvestActiveWindowSeconds: -1})
+	assert.Equal(t, -1, keep.HarvestActiveWindowSeconds, "负数是显式关闭，不能被覆盖")
+}
+
+// 记录一个已知限制：谓词只能判"代理已配置"，无法判"代理可用"。
+// 配了一个连不通的代理时 fail_closed 仍会生效，此时拒发是设计取舍而非 bug。
+func TestOpenAICodexTicketFailClosedTreatsConfiguredProxyAsSource(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Minute)
+	account := accountWithPlan("pro")
+	account.LastUsedAt = &recent
+	cfg := NormalizeOpenAICodexTicketConfig(config.OpenAICodexTicketConfig{
+		FailClosed: true, HarvestLoopEnabled: true,
+	})
+
+	assert.False(t, openAICodexTicketFailClosedEffective(account, cfg, false, now),
+		"未配置代理视为无票源")
+	assert.True(t, openAICodexTicketFailClosedEffective(account, cfg, true, now),
+		"已配置即视为有票源——运行时连通性无法在此判定，属已知限制")
+}
