@@ -1249,6 +1249,15 @@ type OpenAICodexTicketConfig struct {
 	HarvestAttemptTimeoutSeconds int      `mapstructure:"harvest_attempt_timeout_seconds"`
 	FailClosed                   bool     `mapstructure:"fail_closed"`
 	Models                       []string `mapstructure:"models"`
+	// HarvestConcurrency 限制单轮采集的并发探测数。上游原实现对每个
+	// (账号, 模型) 无限 fan-out，在数千账号的部署下会把采集代理和上游同时打爆。
+	// <=0 时取 DefaultOpenAICodexTicketHarvestConcurrency。
+	HarvestConcurrency int `mapstructure:"harvest_concurrency"`
+	// HarvestBackoffBaseSeconds / HarvestBackoffMaxSeconds 控制探测失败后的
+	// 指数退避。没有退避时，拿不到 292 的账号会被按 probe_interval 永久重试
+	// （原实现的 mode=continuous），既烧采集 IP 又给上游持续失败信号。
+	HarvestBackoffBaseSeconds int `mapstructure:"harvest_backoff_base_seconds"`
+	HarvestBackoffMaxSeconds  int `mapstructure:"harvest_backoff_max_seconds"`
 }
 
 // DefaultOpenAIWSClientFirstMessageTimeoutSeconds preserves the legacy ingress deadline.

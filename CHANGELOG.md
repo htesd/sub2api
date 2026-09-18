@@ -1,3 +1,23 @@
+## [0.2.5-session-capacity-antistorm.2] - 2026-09-18
+### Features
+- 从上游 v0.2.6 摘取 Codex 门票系列（6 提交，PR #7315）：ChatGPT OAuth 账号按 `(账号, 模型)` 采集 292 长度的 `x-codex-turn-state`，存入 `account.extra` 的 `codex_turn_ticket:<model>`，业务请求出站时覆盖该请求头。默认关闭，开启后热生效；采集代理可独立配置（`harvest_proxy_url`，支持账号级 `codex_harvest_proxy_url` 覆盖），返回时掩码。
+- 一并摘取 v0.2.6 其余 openai/codex 修复：上游 chat role 兼容（新增 `openai_chat_roles.go`）、response binding context 修复、paused OAuth 账号刷新候选、Codex manifest 重复解析。
+- 门票有效期改为锚定票据自述的签发时间：新增 `decodeOpenAICodexTicketIssuedAt` 解析 Fernet 头部（`raw[0]` 版本字节 `0x80`、`raw[1:9]` 大端 uint64 秒级时间戳），`ExpiresAt = IssuedAt + ttl`。票据结构新增 `IssuedAt` 字段，采集日志带 `issued_at` 与 `capture_lag`。
+- 采集器新增并发上限 `harvest_concurrency`（默认 32）与失败退避 `harvest_backoff_base_seconds` / `harvest_backoff_max_seconds`（默认 30s 起步、翻倍、15 分钟封顶、叠加 20% 正向抖动），退避按 `(账号, 模型)` 隔离，打票成功立即解除。采集周期日志新增 `backoff_skipped` 与 `concurrency`。
+### Design Rationale
+- 门票的作用是反降智，不是解锁模型。`x-codex-turn-state` 是上游签发的 Fernet 回合凭证，长度本身就是状态指示器：292 = 干净窗口，312 = 已降智（多出正好一个 AES 块），后者伴随 `Our servers are currently overloaded`。所以采集的关键前提是出口 IP 的新鲜度，而不是请求量。
+- 采集探测只取响应头：`req.Close = true` + 专用 no-reuse transport，拿到 header 立即 `resp.Body.Close()`，SSE 流一个字节不读。
+- 有效期必须按签发时间算。上游原实现用 `capturedAt + 3600s`，把探测往返与排队延迟白送成额外寿命，票据实际已死后仍会被注入，表现为上游的 `Encrypted content could not be ...`（密文轮换途中的报错）。头部解析失败、版本字节不符、或时间戳落在 `[now-ttl, now+2min]` 之外时回退到 `now`——宁可保守计时，也不要因为畸形头部把票判成永不过期或一出生就过期。
+- 采集限流是对上游实现的有意偏离。原实现对每个 `(账号, 模型)` 无限起 goroutine，且早期提交里的 `HarvestMaxAttempts` / `HarvestFailStreak` 熔断在后续 hardening 中被删除，改成日志里的 `mode=continuous`——没有尝试上限。本部署 3941 个 active OAuth 账号 × 2 个默认模型 ≈ 7882 并发探测挤单个采集代理，且拿不到 292 的账号会按 `probe_interval`（默认 6s）永久重试。在"IP 新鲜度决定成败"的前提下，每 6 秒拿数千发请求锤同一个出口 IP 是烧掉它最快的方式，与该功能的目的直接相反。
+### Notes & Caveats
+- 门票默认关闭，未开启时全链路行为与 `antistorm.1` 完全一致——不采集、不注入。
+- 门票与本分支的 capacity 模式是组合关系，不冲突：`guardOpenAICodexTurnStateEcho` 在 capacity 模式下早退（token 级归属由投影层负责），`applyOpenAICodexTicket` 在 forward / passthrough / messages / ws 四个注入点独立生效，注入时 `h.Set` 无条件覆盖客户端回带值，包括覆盖掉已降智的 312。
+- 采集仅覆盖 `status=active` 且 OAuth-like 的非影子账号；本部署另有 10463 个 `error` 状态 OAuth 账号会被跳过。
+- 探测 miss 日志里的 `len` 是关键诊断位：312 说明当前出口 IP 已被降智，不是网络故障。
+- 尚未实现采集代理池化轮换。当前单 URL（账号级 → 全局设置 → 配置文件，取首个非空）意味着所有探测共享一个出口 IP；若代理形态是"每建新连接自动换出口 IP"的轮换网关，现有 `req.Close = true` + no-reuse transport 已足够，无需额外代码；若是一批固定 IP，则需要轮询与烧号冷却，本版未做。
+- 未合并 v0.2.6 的非 openai/codex 内容（兑换记录分页、deepseek、antigravity、gemini、以及 `ouchihao` 那批 `codex/bug-*` 分支——后者的 "codex" 指用 Codex 撰写的 PR，内容是支付/TOTP/订单等 UI 修复，与 OpenAI Codex 无关）。基线仍是 v0.2.5，非完整 0.2.6 rebase。
+- 验证：`go build ./...` 通过；干净环境（清除 `*_proxy` 环境变量）下 `go test ./...` 51 个包全过、零 FAIL。此前 `TestAliyunCaptchaVerifier_TransportError` 的失败已定位为代理环境变量污染，单跑在合并前后均通过。前端未改动，未跑前端构建。未做真实账号 smoke test，门票采集链路未经真实上游验证。
+
 ## [0.2.5-session-capacity-antistorm.1] - 2026-09-16
 ### Features
 - OAuth 429 同号重试改为有界预算：`SameAccountRetryMax = 3`，退避 1s→2s→4s（上限 8s）并叠加正向抖动。此前 2 分钟窗口内不受次数限制，单个请求能对同一个已限流账号连打十几次。
