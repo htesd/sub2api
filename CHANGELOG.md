@@ -16,7 +16,9 @@
 - 探测 miss 日志里的 `len` 是关键诊断位：312 说明当前出口 IP 已被降智，不是网络故障。
 - 尚未实现采集代理池化轮换。当前单 URL（账号级 → 全局设置 → 配置文件，取首个非空）意味着所有探测共享一个出口 IP；若代理形态是"每建新连接自动换出口 IP"的轮换网关，现有 `req.Close = true` + no-reuse transport 已足够，无需额外代码；若是一批固定 IP，则需要轮询与烧号冷却，本版未做。
 - 未合并 v0.2.6 的非 openai/codex 内容（兑换记录分页、deepseek、antigravity、gemini、以及 `ouchihao` 那批 `codex/bug-*` 分支——后者的 "codex" 指用 Codex 撰写的 PR，内容是支付/TOTP/订单等 UI 修复，与 OpenAI Codex 无关）。基线仍是 v0.2.5，非完整 0.2.6 rebase。
-- 验证：`go build ./...` 通过；干净环境（清除 `*_proxy` 环境变量）下 `go test ./...` 51 个包全过、零 FAIL。此前 `TestAliyunCaptchaVerifier_TransportError` 的失败已定位为代理环境变量污染，单跑在合并前后均通过。前端未改动，未跑前端构建。未做真实账号 smoke test，门票采集链路未经真实上游验证。
+- 验证：`go build ./...` 通过；干净环境（清除 `*_proxy` 环境变量）下 `go test ./...` 51 个包全过、零 FAIL。此前 `TestAliyunCaptchaVerifier_TransportError` 的失败已定位为代理环境变量污染，单跑在合并前后均通过。未做真实账号 smoke test，门票采集链路未经真实上游验证。
+- 前端确有改动（门票系列带入 13 文件 / +223 行：管理端 292 打票开关与打票代理输入、账号页票据状态、中英文案、类型定义），并已随 Dockerfile 的 `frontend-builder` 阶段编入二进制（`pnpm run check:i18n && vue-tsc -b && vite build` → `-tags embed`），线上已用 `292 打票` / `codexTicketEnabledDesc` 等仅存在于前端的字符串在容器内核实。
+- 前端测试：门票相关的 `AccountUsageCell.spec.ts` 与 `SettingsView.spec.ts` 共 88 个用例全过；全量 `vitest run` 为 2165 过 / 2 失败（284 文件中 282 过）。失败的 `ChannelMonitorView.grok.spec.ts` 与 `GroupsView.codexManifest.spec.ts` 在官方 v0.2.5、合并前基线、当前分支三处表现一致，属上游既有问题，且本分支未修改这两个文件。
 
 ## [0.2.5-session-capacity-antistorm.1] - 2026-09-16
 ### Features
