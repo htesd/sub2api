@@ -515,7 +515,12 @@ type OpenAIGatewayService struct {
 	openaiCodexTicketFlight singleflight.Group
 	// openaiCodexTicketBackoff: accountID\x00model → *openAICodexTicketBackoff，
 	// 记录连续失败次数与下次允许探测的时刻。
-	openaiCodexTicketBackoff     sync.Map
+	openaiCodexTicketBackoff sync.Map
+	// openaiCodexTicketProxyBurn: 打票代理 URL → *openAICodexTicketProxyBurnState，
+	// 记录该出口当前拿不到合格票（典型是 312）的冷却窗口。
+	openaiCodexTicketProxyBurn sync.Map
+	// openaiCodexTicketProxyCursor: 代理池轮转游标。
+	openaiCodexTicketProxyCursor atomic.Uint64
 	openaiCodexTicketLifecycleMu sync.Mutex
 	openaiCodexTicketCancel      context.CancelFunc
 	openaiCodexTicketDone        chan struct{}

@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -38,8 +40,25 @@ const (
 	defaultOpenAICodexTicketHarvestConcurrency = 32
 	defaultOpenAICodexTicketBackoffBaseSeconds = 30
 	defaultOpenAICodexTicketBackoffMaxSeconds  = 900
-	openAICodexTicketDefaultModel              = "gpt-6-astra"
-	openAICodexTicketDefaultSolModel           = "gpt-5.6-sol"
+	// 只给近 24 小时跑过流量的账号打票；设为负数可关闭该过滤。
+	defaultOpenAICodexTicketActiveWindowSeconds = 86400
+	// 出口 IP 返回非合格长度后冷却 10 分钟再参与轮换。
+	defaultOpenAICodexTicketProxyBurnCooldownSeconds = 600
+
+	// turn-state 的长度由套餐决定，不是全局常量。实测（2026-09-18，111 个活跃
+	// OAuth 账号）：
+	//   pro      → 292（10 个 AES 块）
+	//   business → 332（12 个 AES 块，Team/Business Premium）
+	// 上游把 target_length 写死成 292，导致 Business 账号永远拿不到票——它们
+	// 返回 200 且 state 结构合法，只是长度天然是 332。
+	openAICodexTicketLengthPro      = 292
+	openAICodexTicketLengthBusiness = 332
+
+	// openAICodexTicketPlanExtraKey 账号级套餐覆盖（pro / team）。留空时按
+	// credentials.plan_type 推断。
+	openAICodexTicketPlanExtraKey    = "codex_ticket_plan"
+	openAICodexTicketDefaultModel    = "gpt-6-astra"
+	openAICodexTicketDefaultSolModel = "gpt-5.6-sol"
 )
 
 // ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用的 292 门票，
@@ -57,6 +76,69 @@ type openAICodexTicket struct {
 	IssuedAt  time.Time `json:"issued_at,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Attempts  int       `json:"attempts"`
+}
+
+// openAICodexTicketTargetLength 返回该账号的合格 turn-state 长度。
+//
+// 优先账号级 extra 覆盖（codex_ticket_plan = pro|team），其次按 credentials
+// 的 plan_type 推断，最后回落到配置里的 target_length。
+//
+// 注意：长度只是筛选器，不能证明模型身份或回答质量。真正的降智判据是上游实际
+// 响应模型（usage_logs.upstream_response_model），长度只用来挑出"这一档套餐里
+// 结构最短的那个 state"。
+func openAICodexTicketTargetLength(account *Account, cfg config.OpenAICodexTicketConfig) int {
+	fallback := cfg.TargetLength
+	if fallback <= 0 {
+		fallback = openAICodexTicketLengthPro
+	}
+	if account == nil {
+		return fallback
+	}
+	if account.Extra != nil {
+		if raw, ok := account.Extra[openAICodexTicketPlanExtraKey].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(raw)) {
+			case "pro":
+				return openAICodexTicketLengthPro
+			case "team", "business":
+				return openAICodexTicketLengthBusiness
+			}
+		}
+	}
+	switch normalizeOpenAICodexTicketPlan(account) {
+	case "pro":
+		return openAICodexTicketLengthPro
+	case "business":
+		return openAICodexTicketLengthBusiness
+	}
+	return fallback
+}
+
+// normalizeOpenAICodexTicketPlan 把 credentials.plan_type 归一到 pro / business /
+// unknown。实测取值：pro、self_serve_business_prolite、
+// self_serve_business_usage_based、free。
+func normalizeOpenAICodexTicketPlan(account *Account) string {
+	if account == nil || account.Credentials == nil {
+		return "unknown"
+	}
+	raw, _ := account.Credentials["plan_type"].(string)
+	plan := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case plan == "":
+		return "unknown"
+	case plan == "pro":
+		return "pro"
+	case strings.Contains(plan, "business"), strings.Contains(plan, "team"):
+		return "business"
+	case plan == "free":
+		return "free"
+	}
+	return "unknown"
+}
+
+// openAICodexTicketPlanEligible 判断该套餐是否可能拿到票。free 账号实测一律被
+// 上游 400 拒绝（无 astra/sol 访问权限），探测它们只是白送失败信号。
+func openAICodexTicketPlanEligible(account *Account) bool {
+	return normalizeOpenAICodexTicketPlan(account) != "free"
 }
 
 // decodeOpenAICodexTicketIssuedAt 只解析 turn-state 的 Fernet 头部：raw[0] 是版本
@@ -156,6 +238,12 @@ func (s *OpenAIGatewayService) openAICodexTicketConfig() config.OpenAICodexTicke
 	if cfg.HarvestBackoffMaxSeconds < cfg.HarvestBackoffBaseSeconds {
 		cfg.HarvestBackoffMaxSeconds = cfg.HarvestBackoffBaseSeconds
 	}
+	if cfg.HarvestActiveWindowSeconds == 0 {
+		cfg.HarvestActiveWindowSeconds = defaultOpenAICodexTicketActiveWindowSeconds
+	}
+	if cfg.HarvestProxyBurnCooldownSeconds <= 0 {
+		cfg.HarvestProxyBurnCooldownSeconds = defaultOpenAICodexTicketProxyBurnCooldownSeconds
+	}
 	if len(cfg.Models) == 0 {
 		cfg.Models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
 	}
@@ -189,7 +277,7 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 	if !cfg.Enabled || !isOpenAICodexTicketAccount(account) {
 		return nil
 	}
-	models, targetLen := cfg.Models, cfg.TargetLength
+	models, targetLen := cfg.Models, openAICodexTicketTargetLength(account, cfg)
 	if len(models) == 0 {
 		models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
 	}
@@ -375,7 +463,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 	}
 	cfg := s.openAICodexTicketConfig()
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	if ticket.valid(time.Now(), cfg.TargetLength) {
+	if ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
@@ -430,7 +518,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	return !ticket.valid(time.Now(), cfg.TargetLength)
+	return !ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg))
 }
 
 func (s *OpenAIGatewayService) fireOpenAICodexTicketProbe(ctx context.Context, account *Account, token, model, proxyURL string, attemptTimeout time.Duration) (state string, status int, err error) {
@@ -507,6 +595,17 @@ func (s *OpenAIGatewayService) StartOpenAICodexTicketHarvester() {
 	if s.openaiCodexTicketStopped || s.openaiCodexTicketDone != nil {
 		return
 	}
+	cfg := s.openAICodexTicketConfig()
+	// 后台主动探测默认不启动。主动探测会用账号凭据从一个与业务出口完全不同的
+	// IP（通常是机房 IP）发请求，在上游看来同一个账号周期性地跨 ASN 跳变，这本身
+	// 就是可识别的关联特征。票据的主路径应该是从真实业务响应里被动捕获（同一出口、
+	// 零额外请求），主动探测只作为兜底，且必须显式开启或手动触发。
+	if !cfg.HarvestLoopEnabled {
+		logger.L().Info("openai_codex_ticket harvester not started",
+			zap.String("reason", "harvest_loop_enabled=false"),
+			zap.String("note", "被动采集仍生效；主动探测需显式开启或手动触发"))
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s.openaiCodexTicketCancel = cancel
@@ -516,9 +615,11 @@ func (s *OpenAIGatewayService) StartOpenAICodexTicketHarvester() {
 		s.openAICodexTicketHarvestLoop(ctx)
 	}()
 	logger.L().Info("openai_codex_ticket harvester started",
-		zap.Int("ttl_seconds", s.openAICodexTicketConfig().TTLSeconds),
-		zap.Int("target_length", s.openAICodexTicketConfig().TargetLength),
-		zap.Strings("models", s.openAICodexTicketConfig().Models),
+		zap.Int("ttl_seconds", cfg.TTLSeconds),
+		zap.Int("default_target_length", cfg.TargetLength),
+		zap.Int("active_window_seconds", cfg.HarvestActiveWindowSeconds),
+		zap.Int("concurrency", cfg.HarvestConcurrency),
+		zap.Strings("models", cfg.Models),
 	)
 }
 
@@ -573,9 +674,25 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	sem := make(chan struct{}, cfg.HarvestConcurrency)
 	probed := 0
 	skipped := 0
+	idle := 0
+	unschedulable := 0
+	ineligible := 0
 	for i := range accounts {
 		account := accounts[i]
 		if account.Status != StatusActive || !isOpenAICodexTicketAccount(&account) {
+			continue
+		}
+		// 尊重调度状态。上游只看 status==active，于是管理员手动"停止调度"的号、
+		// 限流中的号、过载中的号、临时不可调度的号统统照打——这些号本来就不该
+		// 承接流量，给它们打票既浪费干净出口 IP 的窗口期，又在给一个已经被暂停
+		// 的账号持续制造上游请求。
+		if !account.IsSchedulable() {
+			unschedulable++
+			continue
+		}
+		// free 套餐实测一律被上游 400 拒绝（无 astra/sol 权限），探测纯属白送失败。
+		if !openAICodexTicketPlanEligible(&account) {
+			ineligible++
 			continue
 		}
 		for _, model := range cfg.Models {
@@ -584,13 +701,21 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 				continue
 			}
 			// 已有一张有效且未临近过期的票 → 本周期不打，省得白刷。
-			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, cfg.TargetLength) && !t.needsRefresh(now, refreshBefore) {
+			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, openAICodexTicketTargetLength(&account, cfg)) && !t.needsRefresh(now, refreshBefore) {
 				continue
 			}
 			// 连续失败的 (账号, 模型) 在退避窗口内跳过：拿不到 292 往往是出口 IP
 			// 当前不在干净窗口期，按 probe_interval 死磕只会加速烧号烧 IP。
 			if !s.openAICodexTicketProbeAllowed(openAICodexTicketKey(account.ID, model), now) {
 				skipped++
+				continue
+			}
+			// 只给实际在跑流量的账号打票。票据是稀缺资源（每张都要消耗一发真实请求和
+			// 一次干净出口 IP 的窗口期），给几千个闲置号预打票是纯浪费。冷启动代价是
+			// 某个久未使用的号被调度到时第一发没有票，但它一旦发过请求 last_used_at
+			// 就会更新，下一轮（默认 6 秒内）即进入采集范围。
+			if !openAICodexTicketAccountRecentlyUsed(&account, cfg, now) {
+				idle++
 				continue
 			}
 			acc := account
@@ -614,7 +739,10 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	if probed > 0 || skipped > 0 {
 		logger.L().Info("openai_codex_ticket probe cycle",
 			zap.Int("probed", probed), zap.Int("backoff_skipped", skipped),
-			zap.Int("concurrency", cfg.HarvestConcurrency))
+			zap.Int("idle_skipped", idle), zap.Int("unschedulable_skipped", unschedulable),
+			zap.Int("plan_ineligible_skipped", ineligible),
+			zap.Int("concurrency", cfg.HarvestConcurrency),
+			zap.Int("proxy_pool", len(SplitOpenAICodexTicketHarvestProxyPool(s.openAICodexTicketHarvestProxyURLContext(ctx)))))
 	}
 }
 
@@ -626,7 +754,10 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 		return
 	}
 	cfg := s.openAICodexTicketConfig()
-	proxyURL := s.openAICodexTicketHarvestProxyURLContext(ctx)
+	// 代理池轮换：同一个出口反复打票会把自己打黑（返回 312），所以每发探测轮转取一个
+	// 未在冷却中的出口。
+	pool := SplitOpenAICodexTicketHarvestProxyPool(s.openAICodexTicketHarvestProxyURLContext(ctx))
+	proxyURL := s.pickOpenAICodexTicketHarvestProxy(pool, time.Now())
 	if proxyURL == "" || s.httpUpstream == nil || ctx.Err() != nil {
 		return
 	}
@@ -648,12 +779,20 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 				zap.String("reason", "error"), zap.Error(perr))
 			return nil, nil
 		}
-		if status != http.StatusOK || state == "" || len(state) != cfg.TargetLength || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
-			s.noteOpenAICodexTicketProbeFailure(key, cfg, time.Now())
+		wantLen := openAICodexTicketTargetLength(account, cfg)
+		if status != http.StatusOK || state == "" || len(state) != wantLen || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+			now := time.Now()
+			s.noteOpenAICodexTicketProbeFailure(key, cfg, now)
+			// 拿到了响应但长度不对（典型是 312）说明这个出口 IP 已被降智，不是账号
+			// 问题，也不是网络问题——把该代理按冷却时长标记，本轮后续探测换出口。
+			if status == http.StatusOK && state != "" {
+				s.openAICodexTicketProxyBurn(proxyURL, time.Duration(cfg.HarvestProxyBurnCooldownSeconds)*time.Second, now)
+			}
 			// len 是关键诊断位：312 说明当前出口 IP 已被降智，不是网络问题。
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
-				zap.Int("http", status), zap.Int("len", len(state)))
+				zap.Int("http", status), zap.Int("len", len(state)),
+				zap.String("proxy", MaskProxyURL(proxyURL)))
 			return nil, nil
 		}
 		now := time.Now()
@@ -674,12 +813,201 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 		}
 		s.storeOpenAICodexTicket(ctx, account, ticket)
 		s.clearOpenAICodexTicketBackoff(key)
+		s.openAICodexTicketProxyRecover(proxyURL)
 		logger.L().Info("openai_codex_ticket harvested",
 			zap.Int64("account_id", account.ID), zap.String("model", model),
 			zap.Int("length", ticket.Length), zap.String("mode", "continuous"),
-			zap.Time("issued_at", issuedAt), zap.Duration("capture_lag", now.Sub(issuedAt)))
+			zap.Time("issued_at", issuedAt), zap.Duration("capture_lag", now.Sub(issuedAt)),
+			zap.String("proxy", MaskProxyURL(proxyURL)))
 		return nil, nil
 	})
+}
+
+// pickOpenAICodexTicketHarvestProxy 从代理池里轮转取一个出口。
+//
+// 选取规则：优先未被标记为"已烧"的代理，按原子计数器轮转以摊平负载；全部在冷却
+// 中时退而使用最早被标记的那个（它冷却得最久，最可能已经恢复），而不是直接放弃
+// 打票——放弃意味着这一轮所有账号都拿不到票。
+func (s *OpenAIGatewayService) pickOpenAICodexTicketHarvestProxy(pool []string, now time.Time) string {
+	if len(pool) == 0 {
+		return ""
+	}
+	if len(pool) == 1 {
+		return pool[0]
+	}
+	start := int(s.openaiCodexTicketProxyCursor.Add(1)-1) % len(pool)
+	oldestIdx := -1
+	var oldestAt time.Time
+	for i := 0; i < len(pool); i++ {
+		idx := (start + i) % len(pool)
+		candidate := pool[idx]
+		burnedUntil, burnedAt := s.openAICodexTicketProxyBurnState(candidate)
+		if burnedUntil.IsZero() || !now.Before(burnedUntil) {
+			return candidate
+		}
+		if oldestIdx < 0 || burnedAt.Before(oldestAt) {
+			oldestIdx, oldestAt = idx, burnedAt
+		}
+	}
+	return pool[oldestIdx]
+}
+
+// openAICodexTicketProxyBurn 记录某个代理的出口当前拿不到合格票（典型是返回 312，
+// 即该 IP 已被降智），冷却期内不再优先选它。
+func (s *OpenAIGatewayService) openAICodexTicketProxyBurn(proxyURL string, cooldown time.Duration, now time.Time) {
+	if s == nil || strings.TrimSpace(proxyURL) == "" || cooldown <= 0 {
+		return
+	}
+	s.openaiCodexTicketProxyBurn.Store(proxyURL, &openAICodexTicketProxyBurnState{
+		burnedAt:    now,
+		burnedUntil: now.Add(cooldown),
+	})
+}
+
+// openAICodexTicketProxyRecover 该代理刚打出合格票，立即解除标记。
+func (s *OpenAIGatewayService) openAICodexTicketProxyRecover(proxyURL string) {
+	if s == nil || strings.TrimSpace(proxyURL) == "" {
+		return
+	}
+	s.openaiCodexTicketProxyBurn.Delete(proxyURL)
+}
+
+func (s *OpenAIGatewayService) openAICodexTicketProxyBurnState(proxyURL string) (until, at time.Time) {
+	if s == nil {
+		return time.Time{}, time.Time{}
+	}
+	raw, ok := s.openaiCodexTicketProxyBurn.Load(proxyURL)
+	if !ok {
+		return time.Time{}, time.Time{}
+	}
+	state, ok := raw.(*openAICodexTicketProxyBurnState)
+	if !ok || state == nil {
+		return time.Time{}, time.Time{}
+	}
+	return state.burnedUntil, state.burnedAt
+}
+
+// openAICodexTicketProxyBurnState 记录某代理被标记的时刻与冷却截止。
+type openAICodexTicketProxyBurnState struct {
+	burnedAt    time.Time
+	burnedUntil time.Time
+}
+
+// openAICodexTicketCandidateContextKey 暂存本次请求从上游响应头里看到的 turn-state。
+const openAICodexTicketCandidateContextKey = "openai_codex_ticket_candidate"
+
+// openAICodexTicketPassiveCaptureEnabled 被动采集默认开启。
+func (s *OpenAIGatewayService) openAICodexTicketPassiveCaptureEnabled() bool {
+	cfg := s.openAICodexTicketConfig()
+	if cfg.PassiveCaptureEnabled == nil {
+		return true
+	}
+	return *cfg.PassiveCaptureEnabled
+}
+
+// stageOpenAICodexTicketCandidate 在响应头提交点暂存 turn-state 候选。
+//
+// 此刻还不能落库：上游实际响应的模型要等流式响应读完才知道，而一张从"已被降级
+// 的回合"里拿到的 state 正是我们要拒绝的东西。所以先暂存，等 commit 时校验。
+func stageOpenAICodexTicketCandidate(c *gin.Context, state string) {
+	if c == nil || strings.TrimSpace(state) == "" {
+		return
+	}
+	c.Set(openAICodexTicketCandidateContextKey, state)
+}
+
+func stagedOpenAICodexTicketCandidate(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	raw, ok := c.Get(openAICodexTicketCandidateContextKey)
+	if !ok {
+		return ""
+	}
+	state, _ := raw.(string)
+	return strings.TrimSpace(state)
+}
+
+// CommitOpenAICodexTicketFromResponse 被动采集的落库点：请求完成后，若本次上游
+// 响应既没被降级、state 长度又符合该账号套餐，就把它存成票据。
+//
+// 这是票据的主路径，相对主动探测的优势是根本性的：
+//   - 零额外请求，不消耗配额
+//   - 走账号自己的业务出口 IP，不制造跨 ASN 关联特征
+//   - state 来自一个已被证明"没有降级"的真实回合，而不是一次合成的 ping
+//
+// outboundModel 是真正发给上游的模型名；responseModel 是上游自报的响应模型。
+// 两者不一致说明这一回合已被降级（实测 gpt-6-astra → gpt-5.6-luna），此时的
+// state 不能留。
+func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.Context, c *gin.Context, account *Account, outboundModel, responseModel string) {
+	if s == nil || c == nil || account == nil {
+		return
+	}
+	if !s.openAICodexTicketPassiveCaptureEnabled() || !s.openAICodexTicketEnabledContext(ctx) {
+		return
+	}
+	if !isOpenAICodexTicketAccount(account) {
+		return
+	}
+	model := normalizeOpenAICodexTicketModel(outboundModel)
+	if model == "" || !s.openAICodexTicketGatedModel(model) {
+		return
+	}
+	state := stagedOpenAICodexTicketCandidate(c)
+	if state == "" {
+		return
+	}
+	cfg := s.openAICodexTicketConfig()
+	wantLen := openAICodexTicketTargetLength(account, cfg)
+	if len(state) != wantLen || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+		// 长度不符说明这一回合的 state 不是该套餐的"最短档"，通常伴随降级。
+		return
+	}
+	// 上游自报模型与出站模型不一致 → 这一回合已被降级，state 不可留。
+	// responseModel 为空表示没观测到（非流式或解析失败），保守起步：不落库。
+	if !strings.EqualFold(strings.TrimSpace(responseModel), model) {
+		return
+	}
+	now := time.Now()
+	ttl := time.Duration(cfg.TTLSeconds) * time.Second
+	issuedAt := resolveOpenAICodexTicketIssuedAt(state, now, ttl, account.ID, model)
+	existing := s.lookupOpenAICodexTicket(account, model)
+	ticket := &openAICodexTicket{
+		AccountID:  account.ID,
+		Model:      model,
+		State:      state,
+		Length:     len(state),
+		CapturedAt: now,
+		IssuedAt:   issuedAt,
+		ExpiresAt:  issuedAt.Add(ttl),
+		Attempts:   1,
+	}
+	// 已有更新的票就不覆盖（并发请求可能各自带回不同回合的 state）。
+	if existing != nil && existing.valid(now, wantLen) && existing.IssuedAt.After(issuedAt) {
+		return
+	}
+	s.storeOpenAICodexTicket(ctx, account, ticket)
+	s.clearOpenAICodexTicketBackoff(openAICodexTicketKey(account.ID, model))
+	logger.L().Info("openai_codex_ticket captured passively",
+		zap.Int64("account_id", account.ID), zap.String("model", model),
+		zap.Int("length", ticket.Length), zap.Time("issued_at", issuedAt),
+		zap.String("source", "business_response"))
+}
+
+// openAICodexTicketAccountRecentlyUsed 判断账号是否在活跃窗口内跑过流量。
+// 窗口 <=0 表示不限制（退回上游行为：给所有 active 账号打票）。
+// LastUsedAt 为零值（从未使用）时不打票。
+func openAICodexTicketAccountRecentlyUsed(account *Account, cfg config.OpenAICodexTicketConfig, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	if cfg.HarvestActiveWindowSeconds <= 0 {
+		return true
+	}
+	if account.LastUsedAt == nil || account.LastUsedAt.IsZero() {
+		return false
+	}
+	return account.LastUsedAt.After(now.Add(-time.Duration(cfg.HarvestActiveWindowSeconds) * time.Second))
 }
 
 // openAICodexTicketBackoff 记录某个 (账号, 模型) 的连续失败与下次允许探测时刻。
@@ -766,6 +1094,52 @@ func MergeOpenAICodexTicketExtra(extra, current map[string]any) map[string]any {
 		}
 	}
 	return result
+}
+
+// SplitOpenAICodexTicketHarvestProxyPool 把打票代理设置拆成代理池。
+// 兼容单个 URL（历史取值）与逗号/空白分隔的多个 URL：该功能的前提是出口 IP
+// 新鲜度，单个 IP 反复打票会自己变黑，所以需要一批 IP 轮换。
+func SplitOpenAICodexTicketHarvestProxyPool(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t' || r == ';'
+	})
+	pool := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, item := range fields {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, dup := seen[item]; dup {
+			continue
+		}
+		seen[item] = struct{}{}
+		pool = append(pool, item)
+	}
+	return pool
+}
+
+// ValidateOpenAICodexTicketHarvestProxyPool 逐个校验代理池成员，错误里带序号但
+// 不带凭据。空值合法（表示不配置，采集不会启动）。
+func ValidateOpenAICodexTicketHarvestProxyPool(raw string) error {
+	for i, item := range SplitOpenAICodexTicketHarvestProxyPool(raw) {
+		if err := ValidateOpenAICodexTicketHarvestProxyURL(item); err != nil {
+			return fmt.Errorf("harvest proxy #%d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// MaskOpenAICodexTicketHarvestProxyPool 掩码整个池，保持分隔形式便于管理端回显。
+func MaskOpenAICodexTicketHarvestProxyPool(raw string) string {
+	pool := SplitOpenAICodexTicketHarvestProxyPool(raw)
+	masked := make([]string, 0, len(pool))
+	for _, item := range pool {
+		if m := MaskProxyURL(item); m != "" {
+			masked = append(masked, m)
+		}
+	}
+	return strings.Join(masked, ",")
 }
 
 // ValidateOpenAICodexTicketHarvestProxyURL validates only syntax, without making

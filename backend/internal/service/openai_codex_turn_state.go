@@ -58,6 +58,9 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 	c.Writer.Header().Set(canonical, state)
 	noteCodexCapacityTurnState(c, account, state)
 	s.noteOpenAICodexTurnStateProvenance(c, account)
+	// 被动采集：暂存候选，等请求结束确认本回合没被降级后再落库
+	// （见 CommitOpenAICodexTicketFromResponse）。
+	stageOpenAICodexTicketCandidate(c, state)
 }
 
 // stageOpenAICodexTurnState 将上游 turn-state 暂存到延迟提交的响应头集合

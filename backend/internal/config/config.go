@@ -1258,6 +1258,21 @@ type OpenAICodexTicketConfig struct {
 	// （原实现的 mode=continuous），既烧采集 IP 又给上游持续失败信号。
 	HarvestBackoffBaseSeconds int `mapstructure:"harvest_backoff_base_seconds"`
 	HarvestBackoffMaxSeconds  int `mapstructure:"harvest_backoff_max_seconds"`
+	// HarvestActiveWindowSeconds 只给该窗口内跑过流量的账号打票（按
+	// accounts.last_used_at 判定）。票据要消耗一发真实请求与一次干净出口 IP 的
+	// 窗口期，给闲置账号预打票是纯浪费。<=0 表示不限制（退回上游行为）。
+	HarvestActiveWindowSeconds int `mapstructure:"harvest_active_window_seconds"`
+	// HarvestProxyBurnCooldownSeconds 是打票代理返回非合格长度（典型 312，说明该
+	// 出口 IP 已被降智）后的冷却时长，冷却期内轮换会避开它。
+	HarvestProxyBurnCooldownSeconds int `mapstructure:"harvest_proxy_burn_cooldown_seconds"`
+	// HarvestLoopEnabled 控制后台主动探测循环是否启动，默认 false。
+	// 主动探测用账号凭据从与业务出口不同的 IP 发请求，会在上游侧制造"同一账号
+	// 周期性跨 ASN 跳变"的关联特征，风险不低。被动采集（从真实业务响应捕获）
+	// 不受此开关影响，始终随总开关生效。
+	HarvestLoopEnabled bool `mapstructure:"harvest_loop_enabled"`
+	// PassiveCaptureEnabled 控制是否从真实业务响应里被动捕获 turn-state，默认 true。
+	// 零额外请求、同一出口 IP、无新增关联特征，是票据的主路径。
+	PassiveCaptureEnabled *bool `mapstructure:"passive_capture_enabled"`
 }
 
 // DefaultOpenAIWSClientFirstMessageTimeoutSeconds preserves the legacy ingress deadline.

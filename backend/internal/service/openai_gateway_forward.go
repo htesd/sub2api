@@ -1331,6 +1331,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
 		}
+		// 被动采集 turn-state：此刻才同时具备"出站模型"与"上游自报响应模型"，
+		// 可以判断这一回合有没有被降级。见 CommitOpenAICodexTicketFromResponse。
+		s.CommitOpenAICodexTicketFromResponse(ctx, c, account, upstreamModel, forwardResult.UpstreamResponseModel)
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount
 			forwardResult.ImageSize = imageSizeTier

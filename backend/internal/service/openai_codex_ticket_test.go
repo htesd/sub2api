@@ -22,11 +22,17 @@ func fakeCodexTicketState(n int) string {
 }
 
 func ticketTestAccount(id int64) *Account {
+	// Schedulable / LastUsedAt / plan_type 是采集的准入条件：停调度的号、久未使用
+	// 的号、free 套餐的号都不该被探测（见 refreshOpenAICodexTickets）。fixture 必须
+	// 满足这些条件，否则测的就不是它想测的东西了。
+	lastUsed := time.Now().Add(-time.Minute)
 	return &Account{
 		ID:          id,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
-		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1"},
+		Schedulable: true,
+		LastUsedAt:  &lastUsed,
+		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1", "plan_type": "pro"},
 	}
 }
 
