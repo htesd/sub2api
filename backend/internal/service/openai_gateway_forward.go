@@ -1021,6 +1021,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				wsResult.ImageInputSize = imageInputSize
 				wsResult.BillingModel = imageBillingModel
 			}
+			// 注意：WSv2 路径没有 turn-state 暂存与被动采集提交点，该传输上的
+			// 回合不会产出票据。若 Codex 流量迁移到 WSv2，被动采集覆盖率会归零——
+			// 届时需要在 WS 侧补暂存点，并在此处调
+			// CommitOpenAICodexTicketFromResponse（wsResult.UpstreamResponseModel
+			// 同样由 observer 提供，判据可复用）。
 			return wsResult, nil
 		}
 		s.writeOpenAIWSFallbackErrorResponse(c, account, wsErr)

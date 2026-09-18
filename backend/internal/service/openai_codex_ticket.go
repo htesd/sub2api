@@ -372,10 +372,7 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 	key := openAICodexTicketKey(account.ID, model)
 	// 按账号套餐取合格长度。用 pro 的 292 去校验 business 的 332 票会把有效票
 	// 判为无效，在 mem-only 场景（UpdateExtra 失败）下还会顺手把它删掉。
-	targetLen := openAICodexTicketLengthPro
-	if s != nil {
-		targetLen = openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())
-	}
+	targetLen := openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())
 	now := time.Now()
 	var mem *openAICodexTicket
 	if raw, ok := s.openaiCodexTickets.Load(key); ok {
@@ -967,6 +964,11 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if s == nil || c == nil || account == nil {
 		return
 	}
+	// 门禁与落库必须同源：客户端拿到终止事件后立刻断开是常态，此时 Forward 的
+	// ctx 已 cancel，而 GetOpenAICodexTicketEnabled 在 ctx 取消时直接返回 yaml
+	// fallback（不查缓存不查 DB）。面板开启但 yaml 未开的部署里，这会让被动采集
+	// 恰好在这些断连回合被门禁拦死——而落库本身已经解绑了取消。
+	ctx = context.WithoutCancel(ctx)
 	if !s.openAICodexTicketPassiveCaptureEnabled() || !s.openAICodexTicketEnabledContext(ctx) {
 		return
 	}
@@ -1010,9 +1012,8 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if existing != nil && existing.valid(now, wantLen) && existing.IssuedAt.After(issuedAt) {
 		return
 	}
-	// 客户端拿到终止事件后立刻断开是常态，此时 Forward 的 ctx 已 cancel，
-	// UpdateExtra 必然失败。落库与请求生命周期解绑。
-	s.storeOpenAICodexTicket(context.WithoutCancel(ctx), account, ticket)
+	// ctx 在函数入口已 WithoutCancel，与请求生命周期解绑。
+	s.storeOpenAICodexTicket(ctx, account, ticket)
 	s.clearOpenAICodexTicketBackoff(openAICodexTicketKey(account.ID, model))
 	logger.L().Info("openai_codex_ticket captured passively",
 		zap.Int64("account_id", account.ID), zap.String("model", model),

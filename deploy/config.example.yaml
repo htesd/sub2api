@@ -324,14 +324,37 @@ gateway:
   # Credential shadow accounts retain their existing forwarding policy and are not ticket-gated.
   openai_codex_ticket:
     enabled: false
+    # target_length 仅作未知套餐的回落值。turn-state 长度由套餐决定，实测
+    # pro=292、business/team=332，运行时按账号自动取值；也可用账号 extra 的
+    # codex_ticket_plan（pro|team）显式指定。
     target_length: 292
     ttl_seconds: 3600
     refresh_before_seconds: 600
+    # 被动采集：从真实业务响应头捕获 turn-state，且只在上游自报响应模型与出站
+    # 模型一致（本回合未被降级）时落库。零额外请求、走账号自己的业务出口 IP，
+    # 是票据的主路径，默认开启。
+    passive_capture_enabled: true
+    # 后台主动探测循环，默认关闭。它用账号凭据从与业务出口不同的 IP（通常是机房
+    # IP）发合成请求，在上游看来同一账号周期性跨 ASN 跳变，本身即关联特征。
+    harvest_loop_enabled: false
     # 后台「系统设置 → 网关 → Codex 设置」可覆盖此值，无需重启。
-    # 后台值的读取缓存为 5 秒，下个探测周期使用新代理；代理服务商自行负责轮换 IP。
+    # 后台值的读取缓存为 5 秒，下个探测周期使用新代理。
+    # 支持逗号分隔的代理池，按发轮换；返回非合格长度（出口已被降智）的代理会被
+    # 冷却 harvest_proxy_burn_cooldown_seconds 秒后再参与轮换。
     harvest_proxy_url: ""
     harvest_probe_interval_seconds: 6
     harvest_attempt_timeout_seconds: 25
+    # 单轮并发探测上限，防止账号数多时无限 fan-out 打爆采集代理。
+    harvest_concurrency: 32
+    # 探测失败后的指数退避（30s 起步翻倍，900s 封顶）。没有退避时拿不到票的账号
+    # 会按 probe_interval 永久重试，既烧采集 IP 又给上游持续失败信号。
+    harvest_backoff_base_seconds: 30
+    harvest_backoff_max_seconds: 900
+    # 只给该窗口内跑过流量的账号打票（按 accounts.last_used_at）。
+    # 取值 0（未配置）归一成 86400；要关闭该过滤请显式设为负数。
+    harvest_active_window_seconds: 86400
+    # 代理返回非合格长度后的冷却时长。
+    harvest_proxy_burn_cooldown_seconds: 600
     fail_closed: true
     models:
       - gpt-6-astra
