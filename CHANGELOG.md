@@ -1,3 +1,26 @@
+## [0.2.5-session-capacity-antistorm.3] - 2026-09-19
+### Features
+- 票据改为**被动采集为主路径**：从真实业务响应头捕获 `x-codex-turn-state`，仅在上游自报响应模型与出站模型一致（本回合未被降级）且无模型声明冲突时落库。零额外请求、走账号自己的业务出口 IP、state 来自一个已被证明未降级的真实回合。
+- 长度判定从全局写死 292 改为**按账号套餐取值**：`pro=292`、`business/team=332`，支持 `extra.codex_ticket_plan`（pro|team）显式覆盖；未知套餐回落配置值。
+- 后台主动探测循环默认关闭（`harvest_loop_enabled=false`）。采集器新增：尊重 `IsSchedulable()`、排除 free 套餐、活跃窗口过滤（`last_used_at`，默认 24h）、并发上限（默认 32）、按 (账号,模型) 隔离的指数退避（30s→900s）、代理池逗号分隔轮换与非合格长度烧号冷却（默认 600s）。
+- 票据有效期锚定 Fernet 头部自述的签发时间（`raw[0]` 版本字节 + `raw[1:9]` 大端秒级时间戳），不再按本地捕获时刻起算。
+- `fail_closed` 收口为**按账号判定**：只有被动采集 / 未配采集代理 / 账号 idle 或从未使用 / free 套餐——任一成立即放行，避免自举死锁。管理端 `Blocked` 展示复用同一谓词。
+### Design Rationale
+- 实测数据（111 个活跃 OAuth 账号，2026-09-18）推翻了上游三个假设。长度由套餐决定：Business 账号返回 200 且 Fernet 结构合法，只是长度天然 332，被写死的 292 判定丢弃，于是永远拿不到票——而它们恰是流量主力（单号 2770 请求 / 211M token）。
+- 降智是可测的：`usage_logs.upstream_response_model` 显示近 24 小时 `gpt-6-astra` 有 **48.6%** 被换成 `gpt-5.6-luna`（14535/29929），`gpt-5.6-sol` 仅 0.1%。**长度只是筛选器，不能证明模型身份**——真正判据是响应模型。
+- 主动探测用账号凭据从与业务出口不同的 IP（通常机房 IP）发合成请求，在上游看来同一账号周期性跨 ASN 跳变，本身即关联特征。这与反封控方向相反，故降级为兜底并默认关闭。
+- `fail_closed` 的唯一成立前提是该账号确实会被一个可用票源探测到。前提不成立时它退化为自举死锁：没票→拒发→没有成功回合→`last_used_at` 不更新→永远拿不到票。降智可恢复，永久拒发不可。
+- 配置归一化抽成导出纯函数 `NormalizeOpenAICodexTicketConfig`，运行时与展示层共用，避免「运行时放行而 UI 显示已暂停」这类分叉。
+### Notes & Caveats
+- **未证实**：持有票据能否真正降低降智率。7 个有票的 pro 号在观测窗口内零 astra 流量（13 个 pro 中 12 个被管理员停调度），passive 数据无重叠区。要证明需受控实验：挑一个可调度账号开票，对比其自身 astra mismatch 率变化。
+- WSv2 路径没有 turn-state 暂存与提交点，被动采集对它零覆盖。本部署 115 个活跃 OpenAI OAuth 账号中 **112 个开了 WSv2**——这是 `fail_closed` 必须按账号放行的直接原因。
+- free 套餐（64 个账号）被上游一律 400 拒绝，无 astra/sol 访问权限；另有 21 个账号 401（token 失效），属独立问题。
+- 展示层的 `proxyConfigured` 只看 YAML 配置，看不到面板运行时设置的代理；代理只配在面板时 UI 会显示未阻断而运行时阻断（方向为宁可少报警）。
+- 已知限制：谓词只能判「代理已配置」，无法判「代理可用」。配了连不通的代理时 `fail_closed` 仍生效。
+- 未采纳的上游既有问题（非本次引入，需独立评估）：turn-state 明文存 `accounts.extra`、`storeOpenAICodexTicket` 先写内存后写库、探测 token 错误用 `zap.Error` 记录。
+- 审查：经 kimi 与 gpt-5.6-sol 双向对抗审查共 6 轮，累计修复 11 项（含被动采集在流式主路径上完全失效、候选未绑定账号导致 failover 跨号污染、`lookupOpenAICodexTicket` 仍用全局 292、代理池在生产链路为死代码、门禁与落库 ctx 不同源、check-then-store 竞态、烧号误判好代理等），两侧最终均 APPROVE。
+- 验证：`go build ./...`、`go vet ./...`、`go test ./...` 51 包全过零 FAIL。前端未改动。未做真实账号 smoke test。
+
 ## [0.2.5-session-capacity-antistorm.2] - 2026-09-18
 ### Features
 - 从上游 v0.2.6 摘取 Codex 门票系列（6 提交，PR #7315）：ChatGPT OAuth 账号按 `(账号, 模型)` 采集 292 长度的 `x-codex-turn-state`，存入 `account.extra` 的 `codex_turn_ticket:<model>`，业务请求出站时覆盖该请求头。默认关闭，开启后热生效；采集代理可独立配置（`harvest_proxy_url`，支持账号级 `codex_harvest_proxy_url` 覆盖），返回时掩码。

@@ -347,7 +347,7 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 		// 放行，管理端不能还显示"已暂停"。proxyConfigured 用配置值近似——纯函数
 		// 拿不到后台设置，宁可显示未阻断（与运行时的放行方向一致）。
 		status.Blocked = !status.Ready && openAICodexTicketFailClosedEffective(
-			account, cfg, strings.TrimSpace(cfg.HarvestProxyURL) != "", now)
+			account, cfg, len(SplitOpenAICodexTicketHarvestProxyPool(cfg.HarvestProxyURL)) > 0, now)
 		out = append(out, status)
 	}
 	return out
