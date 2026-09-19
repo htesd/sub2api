@@ -214,11 +214,14 @@ func TestCodexTicketPolicyExemptsCredentialShadows(t *testing.T) {
 }
 
 // codexTicketRevokeRepo 模拟"排队期间管理员关掉开关"：ListByPlatform 返回开启
-// 状态的快照，随后 GetByID 返回已关闭的最新状态。
+// 状态的快照，随后 GetByID 返回 latest（可在运行中切换）。
 type codexTicketRevokeRepo struct {
 	AccountRepository
 	snapshot Account
+	mu       sync.Mutex
 	latest   Account
+	getErr   error
+	gone     bool
 	getCalls atomic.Int64
 }
 
@@ -228,37 +231,72 @@ func (r *codexTicketRevokeRepo) ListByPlatform(context.Context, string) ([]Accou
 
 func (r *codexTicketRevokeRepo) GetByID(context.Context, int64) (*Account, error) {
 	r.getCalls.Add(1)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.getErr != nil {
+		return nil, r.getErr
+	}
+	if r.gone {
+		return nil, nil
+	}
 	acc := r.latest
 	return &acc, nil
+}
+
+func (r *codexTicketRevokeRepo) setLatest(mutate func(*Account)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	mutate(&r.latest)
 }
 
 func (r *codexTicketRevokeRepo) UpdateExtra(context.Context, int64, map[string]any) error {
 	return nil
 }
 
-// 排队期间被撤销的账号不得再发出探测请求。快照是排队前取的，而信号量等待与前面
-// 探测的 attempt_timeout 可能长达数十秒——这段时间里管理员关掉开关必须生效。
+// 排队期间被撤销的账号不得再发出探测请求。
+//
+// 授权检查必须 fail-closed：查不到或查询出错时无法确认授权仍有效，只能放弃本轮。
+// 这与业务侧 fail_closed 配置无关——放弃一发后台探测的代价极低，误发的代价是对一个
+// 可能已被保护的账号动手。
 func TestRefreshOpenAICodexTickets_RespectsOptOutWhileQueued(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		extra map[string]any
+		name    string
+		prepare func(*codexTicketRevokeRepo)
 	}{
-		{"总开关被关闭", map[string]any{
-			openAICodexTicketActiveProbeExtraKey: true,
-			openAICodexTicketEnabledExtraKey:     false,
+		{"总开关被关闭", func(r *codexTicketRevokeRepo) {
+			r.setLatest(func(a *Account) {
+				a.Extra = map[string]any{
+					openAICodexTicketActiveProbeExtraKey: true,
+					openAICodexTicketEnabledExtraKey:     false,
+				}
+			})
 		}},
-		{"主动探测被关闭", map[string]any{
-			openAICodexTicketActiveProbeExtraKey: false,
+		{"主动探测被关闭", func(r *codexTicketRevokeRepo) {
+			r.setLatest(func(a *Account) {
+				a.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: false}
+			})
+		}},
+		{"账号已不可调度", func(r *codexTicketRevokeRepo) {
+			r.setLatest(func(a *Account) { a.Schedulable = false })
+		}},
+		{"账号已被删除", func(r *codexTicketRevokeRepo) {
+			r.mu.Lock()
+			r.gone = true
+			r.mu.Unlock()
+		}},
+		{"授权复核查询失败", func(r *codexTicketRevokeRepo) {
+			r.mu.Lock()
+			r.getErr = errors.New("db down")
+			r.mu.Unlock()
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot := *ticketTestAccount(41)
 			snapshot.Status = StatusActive
 
-			latest := snapshot
-			latest.Extra = tc.extra
+			repo := &codexTicketRevokeRepo{snapshot: snapshot, latest: snapshot}
+			tc.prepare(repo)
 
-			repo := &codexTicketRevokeRepo{snapshot: snapshot, latest: latest}
 			upstream := &httpUpstreamRecorder{err: io.EOF}
 			svc := ticketTestService(t, config.OpenAICodexTicketConfig{
 				Enabled:            true,
@@ -273,7 +311,100 @@ func TestRefreshOpenAICodexTickets_RespectsOptOutWhileQueued(t *testing.T) {
 			require.Positive(t, repo.getCalls.Load(),
 				"发请求前必须以最新账号状态复核，否则撤销会被在飞任务绕过")
 			require.Empty(t, upstream.requests,
-				"排队期间被撤销的账号不得再发出探测请求")
+				"排队期间被撤销/无法确认授权的账号不得再发出探测请求")
 		})
 	}
+
+	// 正向对照：授权仍然有效时必须真的发出探测，否则上面的断言可能只是
+	// "探测整体不工作"。
+	t.Run("授权有效时正常探测", func(t *testing.T) {
+		snapshot := *ticketTestAccount(41)
+		snapshot.Status = StatusActive
+		repo := &codexTicketRevokeRepo{snapshot: snapshot, latest: snapshot}
+		upstream := &httpUpstreamRecorder{err: io.EOF}
+		svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+			Enabled:            true,
+			HarvestLoopEnabled: true,
+			HarvestProxyURL:    "socks5h://harvest",
+			Models:             []string{"gpt-6-astra"},
+		}, upstream)
+		svc.accountRepo = repo
+
+		svc.refreshOpenAICodexTickets(context.Background())
+		require.Len(t, upstream.requests, 1, "授权有效时应发出探测")
+	})
+}
+
+// 复核必须发生在**取得并发槽之后**，而不是排队之前。
+//
+// 构造：并发上限 1、两个模型。任务 A 先拿到槽并在上游调用处阻塞，任务 B 在槽上排队；
+// 此时把账号改成已撤销，再放行 A。若复核位置正确（槽之后），B 会看到最新状态并取消，
+// 上游只收到 A 这一发；若复核被错误地移到排队之前，B 早已用旧快照通过检查，上游会
+// 收到两发。
+func TestRefreshOpenAICodexTickets_RechecksAfterQueueing(t *testing.T) {
+	snapshot := *ticketTestAccount(41)
+	snapshot.Status = StatusActive
+
+	repo := &codexTicketRevokeRepo{snapshot: snapshot, latest: snapshot}
+
+	firstInFlight := make(chan struct{})
+	release := make(chan struct{})
+	upstream := &codexTicketBarrierUpstream{firstInFlight: firstInFlight, release: release}
+
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled:            true,
+		HarvestLoopEnabled: true,
+		HarvestProxyURL:    "socks5h://harvest",
+		HarvestConcurrency: 1,
+		Models:             []string{"gpt-6-astra", "gpt-5.6-sol"},
+	}, upstream)
+	svc.accountRepo = repo
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.refreshOpenAICodexTickets(context.Background())
+	}()
+
+	select {
+	case <-firstInFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("第一发探测未在预期时间内进入上游调用")
+	}
+
+	// A 占着唯一的并发槽，B 正在排队。此刻撤销。
+	repo.setLatest(func(a *Account) {
+		a.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: false}
+	})
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("采集周期未结束")
+	}
+
+	require.Equal(t, int64(1), upstream.calls.Load(),
+		"排队中的第二发必须在取得并发槽后复核到撤销并取消；若复核位于排队之前，这里会是 2")
+}
+
+// codexTicketBarrierUpstream 让第一发探测阻塞在上游调用处，用于制造真实排队。
+type codexTicketBarrierUpstream struct {
+	HTTPUpstream
+	calls         atomic.Int64
+	once          sync.Once
+	firstInFlight chan struct{}
+	release       chan struct{}
+}
+
+func (u *codexTicketBarrierUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	u.calls.Add(1)
+	u.once.Do(func() {
+		close(u.firstInFlight)
+		select {
+		case <-u.release:
+		case <-req.Context().Done():
+		}
+	})
+	return nil, io.EOF
 }

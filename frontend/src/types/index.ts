@@ -1174,6 +1174,9 @@ export interface Account {
     ready: boolean
     remaining_seconds: number
     blocked: boolean
+    // account_disabled 与 ready 正交：账号退出票据机制后库存票仍如实展示 ready，
+    // 但不会被注入。后端带 omitempty，false 时字段缺失，判定必须用 === true。
+    account_disabled?: boolean
     expires_at?: string
   }>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.

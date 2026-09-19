@@ -673,6 +673,16 @@ export default {
         codexTurnTicketMissing: 'No valid ticket; requests remain allowed',
         codexTurnTicketReady: '{time} left',
         codexTurnTicketPaused: 'No 292 ticket; this model is paused',
+        codexTurnTicketAccountDisabled: 'Account opted out of tickets; not injected',
+        codexTurnTicketEnabled: 'Ticket mechanism',
+        codexTurnTicketEnabledDesc:
+          'Whether this account participates in the ticket mechanism (harvest and injection). "Inherit global" follows the global switch; "Off" means neither harvesting nor injecting, leaving this account\'s requests untouched.',
+        codexTurnTicketEnabledInherit: 'Inherit global',
+        codexTurnTicketEnabledOn: 'On',
+        codexTurnTicketEnabledOff: 'Off',
+        codexTurnTicketActiveProbe: 'Active probing',
+        codexTurnTicketActiveProbeDesc:
+          'Allow the background loop to send synthetic requests for this account solely to obtain a ticket. Off by default: passive capture adds no upstream requests, while active probing consumes quota and adds extra traffic signal. Also requires harvest_loop_enabled in the config file.',
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:
           'Controls the hosted image_generation bridge and client-declared image tools on Codex /responses text requests. Hosted auto-injection applies only to non-Responses Lite requests. Account policy takes precedence over channel and global settings; standalone image-generation endpoints are unaffected.',

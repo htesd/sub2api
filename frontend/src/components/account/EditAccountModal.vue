@@ -2271,6 +2271,64 @@
             </span>
             <span v-else class="text-gray-500">{{ t('admin.accounts.openai.codexTurnTicketMissing') }}</span>
           </div>
+          <!-- account_disabled 与 ready 正交：库存票如实展示，但不会被注入。 -->
+          <p
+            v-if="codexTurnTicketAccountDisabled"
+            class="pt-1 text-xs text-gray-500 dark:text-gray-400"
+            data-testid="edit-codex-ticket-account-disabled"
+          >
+            {{ t('admin.accounts.openai.codexTurnTicketAccountDisabled') }}
+          </p>
+        </div>
+      </div>
+
+      <!-- Codex 门票账号级开关（仅 OpenAI OAuth / setup-token） -->
+      <div
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token')"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketEnabled') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTurnTicketEnabledDesc') }}
+            </p>
+          </div>
+          <div class="w-52 flex-shrink-0">
+            <Select
+              v-model="codexTicketEnabledMode"
+              data-testid="edit-codex-ticket-enabled-select"
+              :options="codexTicketEnabledModeOptions"
+            />
+          </div>
+        </div>
+        <!-- 主动打票只在本账号参与门票机制时才有意义。 -->
+        <div
+          v-if="codexTicketEnabledMode !== 'off'"
+          class="mt-4 flex items-center justify-between border-l-2 border-gray-200 pl-4 dark:border-dark-600"
+        >
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketActiveProbe') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTurnTicketActiveProbeDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="edit-codex-ticket-active-probe-toggle"
+            @click="codexTicketActiveProbeEnabled = !codexTicketActiveProbeEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              codexTicketActiveProbeEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                codexTicketActiveProbeEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
         </div>
       </div>
 
@@ -3559,6 +3617,12 @@ const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+// 门票账号级开关三态。后端语义：缺键=继承（默认开）、false=关、true=显式开。
+// 因此 inherit 对应"删键"，不是写某个哨兵值。
+type CodexTicketEnabledMode = 'inherit' | 'on' | 'off'
+const codexTicketEnabledMode = ref<CodexTicketEnabledMode>('inherit')
+const codexTicketActiveProbeEnabled = ref(false)
+
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
@@ -3592,6 +3656,36 @@ const editWeeklyResetMode = ref<'rolling' | 'fixed' | null>(null)
 const editWeeklyResetDay = ref<number | null>(null)
 const editWeeklyResetHour = ref<number | null>(null)
 const editResetTimezone = ref<string | null>(null)
+// 与后端 openAICodexTicketAccountEnabled / ...ActiveProbeEnabled 同口径的取值解析。
+// 返回 undefined 表示"无法识别或缺失"，交由调用方决定默认值。
+function parseCodexTicketBool(raw: unknown): boolean | undefined {
+  if (typeof raw === 'boolean') return raw
+  if (typeof raw === 'string') {
+    const v = raw.trim().toLowerCase()
+    if (['false', '0', 'off', 'no'].includes(v)) return false
+    if (['true', '1', 'on', 'yes'].includes(v)) return true
+  }
+  return undefined
+}
+
+function resolveCodexTicketEnabledMode(raw: unknown): CodexTicketEnabledMode {
+  const parsed = parseCodexTicketBool(raw)
+  if (parsed === false) return 'off'
+  if (parsed === true) return 'on'
+  return 'inherit'
+}
+
+const codexTicketEnabledModeOptions = computed(() => [
+  { value: 'inherit', label: t('admin.accounts.openai.codexTurnTicketEnabledInherit') },
+  { value: 'on', label: t('admin.accounts.openai.codexTurnTicketEnabledOn') },
+  { value: 'off', label: t('admin.accounts.openai.codexTurnTicketEnabledOff') }
+])
+
+// 任一模型带 account_disabled 即表示该账号已退出注入。后端 omitempty，必须 === true。
+const codexTurnTicketAccountDisabled = computed(() =>
+  codexTurnTickets.value.some((ticket) => ticket.account_disabled === true)
+)
+
 const codexFingerprintModeOptions = computed(() => [
   { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
   { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
@@ -4043,6 +4137,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
+  codexTicketEnabledMode.value = 'inherit'
+  codexTicketActiveProbeEnabled.value = false
   codexFingerprintMode.value = 'off'
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -4095,6 +4191,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexCLIOnlyAppServerEnabled.value =
         extra?.codex_cli_only_allow_app_server === true
     }
+    // 门票开关回填。容错口径必须与后端一致（openAICodexTicketAccountEnabled）：
+    // bool 直接用；字符串接受 false/0/off/no 与 true/1/on/yes；无法识别的值按"继承"
+    // 处理，缺键同样是"继承"。否则管理员在 UI 上看到的状态会和实际生效的不一致。
+    codexTicketEnabledMode.value = resolveCodexTicketEnabledMode(extra?.codex_ticket_enabled)
+    codexTicketActiveProbeEnabled.value = parseCodexTicketBool(extra?.codex_ticket_active_probe) === true
+
     if (newAccount.type === 'oauth') {
       const fpMode = extra?.codex_fingerprint_mode as string | undefined
       // 缺省/非法值按 off 呈现，与后端 GetCodexFingerprintMode 的 opt-in 语义一致（#5610）
@@ -5627,6 +5729,20 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.codex_cli_only_allow_app_server
         }
+      }
+
+      // 门票账号级开关。inherit=删键（后端缺键即继承全局），on/off 落 boolean，
+      // 走后端 case bool 的最短路径。主动打票在账号退出门票机制时一并删键，避免
+      // 留下"关着总开关却开着子开关"的矛盾状态。
+      if (codexTicketEnabledMode.value === 'inherit') {
+        delete newExtra.codex_ticket_enabled
+      } else {
+        newExtra.codex_ticket_enabled = codexTicketEnabledMode.value === 'on'
+      }
+      if (codexTicketEnabledMode.value !== 'off' && codexTicketActiveProbeEnabled.value) {
+        newExtra.codex_ticket_active_probe = true
+      } else {
+        delete newExtra.codex_ticket_active_probe
       }
 
       // 指纹收敛模式：默认 off（不写入）；device/session/full 是显式 opt-in，

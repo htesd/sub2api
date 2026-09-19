@@ -751,6 +751,16 @@ export default {
         codexTurnTicketMissing: '暂无有效门票，仍允许请求',
         codexTurnTicketReady: '剩余 {time}',
         codexTurnTicketPaused: '未打到 292，该模型已暂停',
+        codexTurnTicketAccountDisabled: '该账号已退出门票机制，不会注入',
+        codexTurnTicketEnabled: '门票机制',
+        codexTurnTicketEnabledDesc:
+          '控制本账号是否参与门票机制（采集与注入）。"继承全局"跟随全局开关；"关闭"表示既不采集也不注入，该账号的请求保持原样。',
+        codexTurnTicketEnabledInherit: '继承全局',
+        codexTurnTicketEnabledOn: '开启',
+        codexTurnTicketEnabledOff: '关闭',
+        codexTurnTicketActiveProbe: '主动打票',
+        codexTurnTicketActiveProbeDesc:
+          '允许后台为本账号发起合成请求来专门打票。默认关闭：被动采集不产生额外上游请求，而主动打票会消耗配额并引入额外流量特征。还需在配置文件开启 harvest_loop_enabled 总闸才会生效。',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',

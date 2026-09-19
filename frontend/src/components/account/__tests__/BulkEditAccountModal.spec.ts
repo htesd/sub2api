@@ -952,6 +952,42 @@ describe('BulkEditAccountModal', () => {
     expect(Object.keys(payload.extra).length).toBeGreaterThan(0)
   })
 
+  // 门票开关走同一条 #6327 教训：批量路径落显式 boolean，不靠删键表达"关闭"。
+  it('OpenAI OAuth 批量编辑门票开关选择「关闭」时应显式提交 codex_ticket_enabled=false', async () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai'],
+      selectedTypes: ['oauth']
+    })
+
+    await wrapper.get('#bulk-edit-openai-codex-ticket-enabled-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: {
+        codex_ticket_enabled: false
+      }
+    })
+  })
+
+  it('OpenAI OAuth 批量编辑可单独开关主动打票', async () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai'],
+      selectedTypes: ['oauth']
+    })
+
+    await wrapper.get('#bulk-edit-openai-codex-ticket-active-probe-enabled').setValue(true)
+    await wrapper.get('[data-testid="bulk-codex-ticket-active-probe-select"]').setValue('on')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: {
+        codex_ticket_active_probe: true
+      }
+    })
+  })
+
   // 与兄弟字段 codex_cli_only 的写法对齐：关闭态同样落显式值，不靠省略表达。
   it('OpenAI OAuth 批量编辑显式 opt-in 模式仍原样提交', async () => {
     const wrapper = mountModal({

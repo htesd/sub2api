@@ -118,7 +118,15 @@
 
     <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
     <template v-else-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token')">
-      <div v-if="codexTurnTickets.length" class="mb-1 space-y-0.5">
+      <!-- 账号退出门票机制时整块降透明度 + title 提示：库存票仍如实展示（ready 不清），
+           但不会被注入，所以是叠加态而非替换某个分支。 -->
+      <div
+        v-if="codexTurnTickets.length"
+        class="mb-1 space-y-0.5"
+        :class="codexTurnTicketAccountDisabled ? 'opacity-60' : ''"
+        :title="codexTurnTicketAccountDisabled ? t('admin.accounts.openai.codexTurnTicketAccountDisabled') : undefined"
+        data-testid="usage-cell-codex-tickets"
+      >
         <div
           v-for="ticket in codexTurnTickets"
           :key="ticket.model"
@@ -801,6 +809,9 @@ const hasOpenAIUsageFallback = computed(() => {
 })
 
 const codexTurnTickets = computed(() => props.account.codex_turn_tickets ?? [])
+const codexTurnTicketAccountDisabled = computed(() =>
+  codexTurnTickets.value.some((ticket) => ticket.account_disabled === true)
+)
 
 function shortCodexTicketModel(model: string) {
   if (model === 'gpt-6-astra') return 'astra'

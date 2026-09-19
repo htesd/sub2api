@@ -493,12 +493,31 @@ func TestOpenAICodexTicketStatusesMarksAccountDisabled(t *testing.T) {
 	account.Type = AccountTypeOAuth
 	account.Extra = map[string]any{openAICodexTicketEnabledExtraKey: false}
 
+	// 库存里放一张结构有效的票：Ready 要如实为 true（库存事实），
+	// 同时 AccountDisabled 也为 true（不会被注入）。两者必须能并存，
+	// 否则管理员无法区分"有票在用"和"有票但已停用"。
+	issued := now.Add(-time.Minute).Truncate(time.Second)
+	state := makeTurnState(openAICodexTicketFernetVersion, issued, 210)
+	for len(state) < openAICodexTicketLengthPro {
+		state += "A"
+	}
+	state = state[:openAICodexTicketLengthPro]
+	account.Extra[openAICodexTicketExtraKey("gpt-6-astra")] = map[string]any{
+		"account_id": float64(account.ID),
+		"model":      "gpt-6-astra",
+		"state":      state,
+		"length":     float64(len(state)),
+		"expires_at": now.Add(30 * time.Minute).Format(time.RFC3339Nano),
+	}
+
 	cfg := config.OpenAICodexTicketConfig{Enabled: true, Models: []string{"gpt-6-astra"}}
 	statuses := OpenAICodexTicketStatuses(account, cfg, now)
 	require.NotEmpty(t, statuses)
 	for _, st := range statuses {
 		assert.True(t, st.AccountDisabled,
 			"账号已退出时必须标出，否则管理员会误以为该号在用票")
+		assert.True(t, st.Ready,
+			"库存里确实有一张结构有效的票，Ready 要如实反映；它与 AccountDisabled 并存")
 		assert.False(t, st.Blocked, "退出的账号不参与票据机制，也不该被判为阻断")
 	}
 

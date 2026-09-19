@@ -3298,6 +3298,55 @@
         </div>
       </div>
 
+      <!-- Codex 门票账号级开关（仅 OpenAI OAuth） -->
+      <div
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketEnabled') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTurnTicketEnabledDesc') }}
+            </p>
+          </div>
+          <div class="w-52 flex-shrink-0">
+            <Select
+              v-model="codexTicketEnabledMode"
+              data-testid="create-codex-ticket-enabled-select"
+              :options="codexTicketEnabledModeOptions"
+            />
+          </div>
+        </div>
+        <div
+          v-if="codexTicketEnabledMode !== 'off'"
+          class="mt-4 flex items-center justify-between border-l-2 border-gray-200 pl-4 dark:border-dark-600"
+        >
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketActiveProbe') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.codexTurnTicketActiveProbeDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="create-codex-ticket-active-probe-toggle"
+            @click="codexTicketActiveProbeEnabled = !codexTicketActiveProbeEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              codexTicketActiveProbeEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                codexTicketActiveProbeEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div
         v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
@@ -4438,6 +4487,15 @@ const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+// 门票账号级开关三态：inherit=不落键（后端缺键即继承全局）、on/off=落 boolean。
+type CodexTicketEnabledMode = 'inherit' | 'on' | 'off'
+const codexTicketEnabledMode = ref<CodexTicketEnabledMode>('inherit')
+const codexTicketActiveProbeEnabled = ref(false)
+const codexTicketEnabledModeOptions = computed(() => [
+  { value: 'inherit' as CodexTicketEnabledMode, label: t('admin.accounts.openai.codexTurnTicketEnabledInherit') },
+  { value: 'on' as CodexTicketEnabledMode, label: t('admin.accounts.openai.codexTurnTicketEnabledOn') },
+  { value: 'off' as CodexTicketEnabledMode, label: t('admin.accounts.openai.codexTurnTicketEnabledOff') },
+])
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 const codexFingerprintModeOptions = computed(() => [
@@ -5360,6 +5418,8 @@ const resetForm = () => {
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
+  codexTicketEnabledMode.value = 'inherit'
+  codexTicketActiveProbeEnabled.value = false
   codexFingerprintMode.value = 'off'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -5459,6 +5519,17 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     extra.codex_cli_only_allow_app_server = true
   } else {
     delete extra.codex_cli_only_allow_app_server
+  }
+  // 门票账号级开关：inherit 不落键（继承全局），on/off 落 boolean。
+  if (codexTicketEnabledMode.value === 'inherit') {
+    delete extra.codex_ticket_enabled
+  } else {
+    extra.codex_ticket_enabled = codexTicketEnabledMode.value === 'on'
+  }
+  if (codexTicketEnabledMode.value !== 'off' && codexTicketActiveProbeEnabled.value) {
+    extra.codex_ticket_active_probe = true
+  } else {
+    delete extra.codex_ticket_active_probe
   }
   // 收敛是显式 opt-in：off 即默认值，不落键；device/session/full 必须显式写入，
   // 否则管理员的选择会被当成默认而丢失（#5610）。

@@ -39,6 +39,28 @@ func ticketTestAccount(id int64) *Account {
 	}
 }
 
+// ticketTestPassthroughRepo 给探测前的授权复核提供一个"状态未变"的应答。
+// 复核是 fail-closed 的（查不到即取消探测），所以直接调 probeOnce 的用例必须有
+// 可用的 accountRepo，否则测不到目标行为。
+type ticketTestPassthroughRepo struct {
+	AccountRepository
+	account *Account
+}
+
+func (r *ticketTestPassthroughRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	if r.account != nil {
+		acc := *r.account
+		return &acc, nil
+	}
+	acc := *ticketTestAccount(id)
+	acc.Status = StatusActive
+	return &acc, nil
+}
+
+func (r *ticketTestPassthroughRepo) UpdateExtra(context.Context, int64, map[string]any) error {
+	return nil
+}
+
 func ticketTestService(t *testing.T, cfg config.OpenAICodexTicketConfig, upstream HTTPUpstream) *OpenAIGatewayService {
 	t.Helper()
 	return &OpenAIGatewayService{
@@ -46,6 +68,7 @@ func ticketTestService(t *testing.T, cfg config.OpenAICodexTicketConfig, upstrea
 			Gateway: config.GatewayConfig{OpenAICodexTicket: cfg},
 		},
 		httpUpstream: upstream,
+		accountRepo:  &ticketTestPassthroughRepo{},
 	}
 }
 

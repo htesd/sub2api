@@ -926,21 +926,37 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 	// 撤销缺口：账号快照是在排队之前取的，排队期间（信号量等待 + 前面的探测各自最长
 	// attempt_timeout）管理员可能已经关掉开关。发请求前必须以最新状态复核一次，否则
 	// "关掉开关"会被在飞任务绕过——对一个正在被保护的账号继续发合成请求。
-	if account != nil && s.accountRepo != nil {
-		if latest, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && latest != nil {
-			if !openAICodexTicketAccountEnabled(latest) || !openAICodexTicketAccountActiveProbeEnabled(latest) {
-				logger.L().Info("openai_codex_ticket probe cancelled",
-					zap.Int64("account_id", account.ID), zap.String("model", model),
-					zap.String("reason", "opted_out_while_queued"))
-				return
-			}
-			if !latest.IsSchedulable() {
-				logger.L().Info("openai_codex_ticket probe cancelled",
-					zap.Int64("account_id", account.ID), zap.String("model", model),
-					zap.String("reason", "unschedulable_while_queued"))
-				return
-			}
-		}
+	//
+	// 这是对"是否允许发出这发合成请求"的授权检查，取值方向必须 fail-closed：
+	// 查不到（账号已删除）或查询出错时我们无法确认授权仍然有效，只能放弃本轮，
+	// 等下一个周期重试。这与业务侧的 fail_closed 配置是两件事——那个决定的是
+	// "客户端请求要不要失败"，而这里只是"后台要不要多发一发探测"，放弃的代价
+	// 极低，误发的代价是对一个可能已被保护的账号动手。
+	if account == nil || s.accountRepo == nil {
+		return
+	}
+	latest, err := s.accountRepo.GetByID(ctx, account.ID)
+	switch {
+	case err != nil:
+		logger.L().Info("openai_codex_ticket probe cancelled",
+			zap.Int64("account_id", account.ID), zap.String("model", model),
+			zap.String("reason", "authorization_recheck_failed"), zap.Error(err))
+		return
+	case latest == nil:
+		logger.L().Info("openai_codex_ticket probe cancelled",
+			zap.Int64("account_id", account.ID), zap.String("model", model),
+			zap.String("reason", "account_gone_while_queued"))
+		return
+	case !openAICodexTicketAccountEnabled(latest) || !openAICodexTicketAccountActiveProbeEnabled(latest):
+		logger.L().Info("openai_codex_ticket probe cancelled",
+			zap.Int64("account_id", account.ID), zap.String("model", model),
+			zap.String("reason", "opted_out_while_queued"))
+		return
+	case !latest.IsSchedulable():
+		logger.L().Info("openai_codex_ticket probe cancelled",
+			zap.Int64("account_id", account.ID), zap.String("model", model),
+			zap.String("reason", "unschedulable_while_queued"))
+		return
 	}
 	cfg := s.openAICodexTicketConfig()
 	// 代理池轮换：同一个出口反复打票会把自己打黑（返回 312），所以每发探测轮转取一个

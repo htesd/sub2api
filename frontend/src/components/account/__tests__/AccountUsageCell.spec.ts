@@ -106,6 +106,51 @@ describe('AccountUsageCell', () => {
     })
   })
 
+  // account_disabled 与 ready 正交：退出门票机制后库存票仍如实展示剩余时间，
+  // 只是整块降透明度 + title 提示"不会注入"。不能把它做成替换 ready 的分支，
+  // 否则管理员分不清"没票"和"有票但停用"。
+  it('marks tickets as not injected when the account opted out', async () => {
+    getUsage.mockResolvedValue({})
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9703,
+          platform: 'openai',
+          type: 'oauth',
+          codex_turn_tickets: [
+            { model: 'gpt-6-astra', ready: true, remaining_seconds: 2520, blocked: false, account_disabled: true },
+          ],
+        }),
+      },
+      global: { stubs: {
+        OpenAIQuotaResetCell: { template: '<div data-test="quota-reset" />' },
+        UsageProgressBar: true,
+        AccountQuotaInfo: true,
+      } },
+    })
+    await flushPromises()
+
+    const block = wrapper.get('[data-testid="usage-cell-codex-tickets"]')
+    expect(block.classes()).toContain('opacity-60')
+    expect(block.attributes('title')).toBe('admin.accounts.openai.codexTurnTicketAccountDisabled')
+    // 库存事实必须照常展示，不能因为停用就假装没票。
+    expect(wrapper.text()).toContain('42m00s')
+
+    // 未停用的账号不得带这两个标记，否则断言会永真。
+    await wrapper.setProps({
+      account: {
+        ...wrapper.props('account'),
+        codex_turn_tickets: [
+          { model: 'gpt-6-astra', ready: true, remaining_seconds: 2520, blocked: false },
+        ],
+      },
+    })
+    const enabled = wrapper.get('[data-testid="usage-cell-codex-tickets"]')
+    expect(enabled.classes()).not.toContain('opacity-60')
+    expect(enabled.attributes('title')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it.each(['oauth', 'setup-token'] as const)('renders Codex ticket status for OpenAI %s accounts', async (type) => {
     getUsage.mockResolvedValue({})
     const wrapper = mount(AccountUsageCell, {

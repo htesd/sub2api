@@ -973,6 +973,54 @@
         </div>
       </div>
 
+      <!-- Codex 门票账号级开关（仅 OpenAI OAuth） -->
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketEnabled') }}</label>
+          <input
+            id="bulk-edit-openai-codex-ticket-enabled-enabled"
+            v-model="enableCodexTicketEnabled"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div :class="!enableCodexTicketEnabled && 'pointer-events-none opacity-50'">
+          <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.codexTurnTicketEnabledDesc') }}
+          </p>
+          <!-- 批量路径没有"继承全局"档：JSONB 顶层合并语义下删键只表示"本次不更新"，
+               清不掉账号上已有的 true/false，无法表达"回到继承"。只给开/关两档。 -->
+          <Select
+            v-model="codexTicketEnabledValue"
+            data-testid="bulk-codex-ticket-enabled-select"
+            :options="codexTicketEnabledValueOptions"
+          />
+        </div>
+      </div>
+
+      <!-- Codex 主动打票（仅 OpenAI OAuth） -->
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexTurnTicketActiveProbe') }}</label>
+          <input
+            id="bulk-edit-openai-codex-ticket-active-probe-enabled"
+            v-model="enableCodexTicketActiveProbe"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div :class="!enableCodexTicketActiveProbe && 'pointer-events-none opacity-50'">
+          <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.codexTurnTicketActiveProbeDesc') }}
+          </p>
+          <Select
+            v-model="codexTicketActiveProbeValue"
+            data-testid="bulk-codex-ticket-active-probe-select"
+            :options="codexTicketActiveProbeValueOptions"
+          />
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1706,6 +1754,20 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const upstreamBillingAutoProbeMode = ref<'enabled' | 'disabled'>('enabled')
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+// 批量路径只有开/关两档，见模板注释与提交处的 #6327 说明。
+const enableCodexTicketEnabled = ref(false)
+const codexTicketEnabledValue = ref<'on' | 'off'>('off')
+const codexTicketEnabledValueOptions = computed(() => [
+  { value: 'on' as const, label: t('admin.accounts.openai.codexTurnTicketEnabledOn') },
+  { value: 'off' as const, label: t('admin.accounts.openai.codexTurnTicketEnabledOff') },
+])
+const enableCodexTicketActiveProbe = ref(false)
+const codexTicketActiveProbeValue = ref<'on' | 'off'>('off')
+const codexTicketActiveProbeValueOptions = computed(() => [
+  { value: 'on' as const, label: t('admin.accounts.openai.codexTurnTicketEnabledOn') },
+  { value: 'off' as const, label: t('admin.accounts.openai.codexTurnTicketEnabledOff') },
+])
+
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const enableCodexFingerprintMode = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
@@ -2089,6 +2151,17 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
 
+  // 门票账号级开关。批量路径一律落显式 boolean 哨兵值，理由同下方 #6327 注释：
+  // JSONB 顶层合并只处理 payload 里出现的键，删键清不掉账号上已有的值。
+  if (enableCodexTicketEnabled.value) {
+    const extra = ensureExtra()
+    extra.codex_ticket_enabled = codexTicketEnabledValue.value === 'on'
+  }
+  if (enableCodexTicketActiveProbe.value) {
+    const extra = ensureExtra()
+    extra.codex_ticket_active_probe = codexTicketActiveProbeValue.value === 'on'
+  }
+
   if (enableCodexFingerprintMode.value) {
     const extra = ensureExtra()
     // off 必须显式落键，不能靠删本地键表达。批量更新走 JSONB 顶层合并
@@ -2224,6 +2297,8 @@ const handleSubmit = async () => {
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
     enableCodexFingerprintMode.value ||
+    enableCodexTicketEnabled.value ||
+    enableCodexTicketActiveProbe.value ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -2374,7 +2449,11 @@ watch(
       enableUpstreamBillingAutoProbe.value = false
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
-      enableCodexFingerprintMode.value = false
+      enableCodexTicketEnabled.value = false
+  codexTicketEnabledValue.value = 'off'
+  enableCodexTicketActiveProbe.value = false
+  codexTicketActiveProbeValue.value = 'off'
+  enableCodexFingerprintMode.value = false
       codexFingerprintMode.value = 'off'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false

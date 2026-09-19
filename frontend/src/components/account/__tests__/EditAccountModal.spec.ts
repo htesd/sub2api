@@ -1379,6 +1379,63 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_responses_supported).toBe(true)
   })
 
+  // 门票三态的持久化语义：inherit=删键（后端缺键即继承全局）、on/off=落 boolean。
+  // 这三条一起钉住"继承"不能退化成写死的 true——否则全局关掉后账号仍在跑。
+  it('门票开关选择「继承全局」时不落键', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { codex_ticket_enabled: false }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    // 回填应把已有的 false 呈现为「关闭」，而不是默认的「继承」。
+    expect(wrapper.text()).toContain('admin.accounts.openai.codexTurnTicketEnabled')
+    await wrapper.get('[data-testid="edit-codex-ticket-enabled-select"]').setValue('inherit')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('codex_ticket_enabled')
+  })
+
+  it('门票开关选择「关闭」时落 false 并清掉主动打票子键', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { codex_ticket_active_probe: true }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="edit-codex-ticket-enabled-select"]').setValue('off')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.codex_ticket_enabled).toBe(false)
+    // 不能留下"总开关关着、子开关还开着"的矛盾状态。
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('codex_ticket_active_probe')
+  })
+
+  it('主动打票需显式 opt-in，开启后落 true', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    // 默认（缺键）不得落主动打票键。
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('codex_ticket_active_probe')
+
+    await wrapper.get('button[data-testid="edit-codex-ticket-active-probe-toggle"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.codex_ticket_active_probe).toBe(true)
+  })
+
   it('submits Codex image tool force-inject mode as bridge override', async () => {
     const account = buildAccount()
     account.extra = {
