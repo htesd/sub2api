@@ -146,9 +146,12 @@ func normalizeOpenAICodexTicketPlan(account *Account) string {
 // openAICodexTicketAccountEnabled 账号级总开关：缺省继承全局，显式 false 则该号
 // 完全不参与票据机制——既不被动采集，也不注入。
 //
-// 关掉它才是真正的隔离。只关主动探测是不够的：注入同样有风险（把一张最多一小时前
-// 签发的 state 覆盖到后续请求上，其自述时间与当前会话不匹配，是可辨识异常），
-// 而注入的票可以来自被动采集。
+// 关掉它才是真正的隔离。只关主动探测是不够的：被动采集本身不新增任何上游请求，
+// 但**注入**存在重放与上下文不匹配的风险面（同一张票跨会话/并发回合复用，且其自述
+// 签发时间早于当前请求），而注入的票可以来自被动采集。
+//
+// 注意：注入与封号的因果关系尚未验证——回合凭证本来就可能被正常复用，单凭时间戳
+// 较早不足以断言异常。这里的取舍是"无法证伪就提供关掉的能力"。
 func openAICodexTicketAccountEnabled(account *Account) bool {
 	if account == nil {
 		return false
@@ -357,6 +360,10 @@ type OpenAICodexTicketStatus struct {
 	RemainingSeconds int64      `json:"remaining_seconds"`
 	Blocked          bool       `json:"blocked"`
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	// AccountDisabled 表示该账号已通过 codex_ticket_enabled 退出票据机制：
+	// 库存里的票不会被注入。与 Blocked 是两回事——Blocked 是"没票且拒发"，
+	// 这个是"有票也不用"。
+	AccountDisabled bool `json:"account_disabled,omitempty"`
 }
 
 func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketConfig, now time.Time) []OpenAICodexTicketStatus {
@@ -399,6 +406,12 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 		// 与运行时同源：被动采集模式、无票源、idle、free 套餐等情况下运行时会
 		// 放行，管理端不能还显示"已暂停"。proxyConfigured 用配置值近似——纯函数
 		// 拿不到后台设置，宁可显示未阻断（与运行时的放行方向一致）。
+		// 账号级关闭时票据不会被注入，Ready 只代表"库存里有一张结构有效的票"。
+		// 不把它清成 false（库存事实要如实展示），但显式标出不可用，避免管理员
+		// 误以为该号正在使用票据。
+		if !openAICodexTicketAccountEnabled(account) {
+			status.AccountDisabled = true
+		}
 		status.Blocked = !status.Ready && openAICodexTicketFailClosedEffective(
 			account, cfg, len(SplitOpenAICodexTicketHarvestProxyPool(cfg.HarvestProxyURL)) > 0, now)
 		out = append(out, status)
@@ -909,6 +922,25 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) {
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
 		return
+	}
+	// 撤销缺口：账号快照是在排队之前取的，排队期间（信号量等待 + 前面的探测各自最长
+	// attempt_timeout）管理员可能已经关掉开关。发请求前必须以最新状态复核一次，否则
+	// "关掉开关"会被在飞任务绕过——对一个正在被保护的账号继续发合成请求。
+	if account != nil && s.accountRepo != nil {
+		if latest, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && latest != nil {
+			if !openAICodexTicketAccountEnabled(latest) || !openAICodexTicketAccountActiveProbeEnabled(latest) {
+				logger.L().Info("openai_codex_ticket probe cancelled",
+					zap.Int64("account_id", account.ID), zap.String("model", model),
+					zap.String("reason", "opted_out_while_queued"))
+				return
+			}
+			if !latest.IsSchedulable() {
+				logger.L().Info("openai_codex_ticket probe cancelled",
+					zap.Int64("account_id", account.ID), zap.String("model", model),
+					zap.String("reason", "unschedulable_while_queued"))
+				return
+			}
+		}
 	}
 	cfg := s.openAICodexTicketConfig()
 	// 代理池轮换：同一个出口反复打票会把自己打黑（返回 312），所以每发探测轮转取一个

@@ -347,15 +347,46 @@ func TestOpenAICodexTicketStatusesNormalizesConfigLikeRuntime(t *testing.T) {
 	account.Type = AccountTypeOAuth
 	account.LastUsedAt = &stale
 
+	// 必须 opt-in 主动探测，否则 fail_closed 在更前面的入口就返回 false，
+	// 这个用例会变成空转——删掉归一化它照样通过。
+	account.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
+
 	// 注意：不显式设置 HarvestActiveWindowSeconds，模拟真实默认路径。
 	raw := config.OpenAICodexTicketConfig{
 		Enabled: true, FailClosed: true, HarvestLoopEnabled: true,
 		HarvestProxyURL: "socks5h://harvest",
 		Models:          []string{"gpt-6-astra"},
 	}
-	for _, st := range OpenAICodexTicketStatuses(account, raw, now) {
+	statuses := OpenAICodexTicketStatuses(account, raw, now)
+	require.NotEmpty(t, statuses, "必须真的产出状态条目，否则断言是空转")
+	for _, st := range statuses {
 		assert.False(t, st.Blocked,
-			"idle 账号运行时会放行（主动循环按 idle 跳过它），展示层必须一致")
+			"idle 账号运行时会放行（主动循环按 idle 跳过它），展示层必须一致；"+
+				"若移除 NormalizeOpenAICodexTicketConfig，window=0 会被当成不限制而在此判定为阻断")
+	}
+
+	// 反向锚点：显式给出窗口时，idle 账号同样放行——证明上面的 false 来自
+	// 窗口判定而不是别的入口。
+	explicit := raw
+	explicit.HarvestActiveWindowSeconds = 86400
+	explicitStatuses := OpenAICodexTicketStatuses(account, explicit, now)
+	require.NotEmpty(t, explicitStatuses)
+	for _, st := range explicitStatuses {
+		assert.False(t, st.Blocked)
+	}
+
+	// 正向锚点：同一账号活跃时必须阻断，否则说明谓词整体失效、上面的 false 无意义。
+	activeAccount := accountWithPlan("pro")
+	activeAccount.ID = 10
+	activeAccount.Platform = PlatformOpenAI
+	activeAccount.Type = AccountTypeOAuth
+	recent := now.Add(-time.Minute)
+	activeAccount.LastUsedAt = &recent
+	activeAccount.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
+	activeStatuses := OpenAICodexTicketStatuses(activeAccount, raw, now)
+	require.NotEmpty(t, activeStatuses)
+	for _, st := range activeStatuses {
+		assert.True(t, st.Blocked, "活跃且票源具备时无票即阻断")
 	}
 }
 
@@ -451,4 +482,28 @@ func TestOpenAICodexTicketFailClosedRequiresPerAccountActiveProbe(t *testing.T) 
 			openAICodexTicketEnabledExtraKey:     false,
 		}), cfg, true, now),
 		"账号级总开关关掉时不参与票据机制，也不该被 fail_closed 拦")
+}
+
+// 已退出票据机制的账号：库存票如实展示 Ready，但必须标出不会被注入。
+func TestOpenAICodexTicketStatusesMarksAccountDisabled(t *testing.T) {
+	now := time.Now()
+	account := accountWithPlan("pro")
+	account.ID = 11
+	account.Platform = PlatformOpenAI
+	account.Type = AccountTypeOAuth
+	account.Extra = map[string]any{openAICodexTicketEnabledExtraKey: false}
+
+	cfg := config.OpenAICodexTicketConfig{Enabled: true, Models: []string{"gpt-6-astra"}}
+	statuses := OpenAICodexTicketStatuses(account, cfg, now)
+	require.NotEmpty(t, statuses)
+	for _, st := range statuses {
+		assert.True(t, st.AccountDisabled,
+			"账号已退出时必须标出，否则管理员会误以为该号在用票")
+		assert.False(t, st.Blocked, "退出的账号不参与票据机制，也不该被判为阻断")
+	}
+
+	account.Extra = nil
+	for _, st := range OpenAICodexTicketStatuses(account, cfg, now) {
+		assert.False(t, st.AccountDisabled)
+	}
 }

@@ -75,6 +75,13 @@ type codexTicketLifecycleRepo struct {
 	persist func(context.Context) error
 }
 
+// GetByID 供探测前的撤销复核使用（probeOnceOpenAICodexTicket）。返回与
+// ListByPlatform 同一份账号，表示"开关未变"。
+func (r *codexTicketLifecycleRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
+	acc := r.account
+	return &acc, nil
+}
+
 func (r *codexTicketLifecycleRepo) ListByPlatform(ctx context.Context, _ string) ([]Account, error) {
 	if r.list != nil {
 		return r.list(ctx)
@@ -204,4 +211,69 @@ func TestCodexTicketPolicyExemptsCredentialShadows(t *testing.T) {
 	}
 	svc.refreshOpenAICodexTickets(context.Background())
 	require.Empty(t, upstream.requests)
+}
+
+// codexTicketRevokeRepo 模拟"排队期间管理员关掉开关"：ListByPlatform 返回开启
+// 状态的快照，随后 GetByID 返回已关闭的最新状态。
+type codexTicketRevokeRepo struct {
+	AccountRepository
+	snapshot Account
+	latest   Account
+	getCalls atomic.Int64
+}
+
+func (r *codexTicketRevokeRepo) ListByPlatform(context.Context, string) ([]Account, error) {
+	return []Account{r.snapshot}, nil
+}
+
+func (r *codexTicketRevokeRepo) GetByID(context.Context, int64) (*Account, error) {
+	r.getCalls.Add(1)
+	acc := r.latest
+	return &acc, nil
+}
+
+func (r *codexTicketRevokeRepo) UpdateExtra(context.Context, int64, map[string]any) error {
+	return nil
+}
+
+// 排队期间被撤销的账号不得再发出探测请求。快照是排队前取的，而信号量等待与前面
+// 探测的 attempt_timeout 可能长达数十秒——这段时间里管理员关掉开关必须生效。
+func TestRefreshOpenAICodexTickets_RespectsOptOutWhileQueued(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra map[string]any
+	}{
+		{"总开关被关闭", map[string]any{
+			openAICodexTicketActiveProbeExtraKey: true,
+			openAICodexTicketEnabledExtraKey:     false,
+		}},
+		{"主动探测被关闭", map[string]any{
+			openAICodexTicketActiveProbeExtraKey: false,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := *ticketTestAccount(41)
+			snapshot.Status = StatusActive
+
+			latest := snapshot
+			latest.Extra = tc.extra
+
+			repo := &codexTicketRevokeRepo{snapshot: snapshot, latest: latest}
+			upstream := &httpUpstreamRecorder{err: io.EOF}
+			svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+				Enabled:            true,
+				HarvestLoopEnabled: true,
+				HarvestProxyURL:    "socks5h://harvest",
+				Models:             []string{"gpt-6-astra"},
+			}, upstream)
+			svc.accountRepo = repo
+
+			svc.refreshOpenAICodexTickets(context.Background())
+
+			require.Positive(t, repo.getCalls.Load(),
+				"发请求前必须以最新账号状态复核，否则撤销会被在飞任务绕过")
+			require.Empty(t, upstream.requests,
+				"排队期间被撤销的账号不得再发出探测请求")
+		})
+	}
 }

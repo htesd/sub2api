@@ -351,6 +351,17 @@ type codexTicketRefreshRepo struct {
 	updates  map[string]any
 }
 
+// GetByID 供探测前的撤销复核使用（probeOnceOpenAICodexTicket）。
+func (r *codexTicketRefreshRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	for i := range r.accounts {
+		if r.accounts[i].ID == id {
+			acc := r.accounts[i]
+			return &acc, nil
+		}
+	}
+	return nil, nil
+}
+
 func (r *codexTicketRefreshRepo) ListByPlatform(context.Context, string) ([]Account, error) {
 	return r.accounts, nil
 }
