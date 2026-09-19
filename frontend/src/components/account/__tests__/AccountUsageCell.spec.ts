@@ -130,9 +130,8 @@ describe('AccountUsageCell', () => {
     })
     await flushPromises()
 
-    const block = wrapper.get('[data-testid="usage-cell-codex-tickets"]')
-    expect(block.classes()).toContain('opacity-60')
-    expect(block.attributes('title')).toBe('admin.accounts.openai.codexTurnTicketAccountDisabled')
+    const badge = wrapper.get('[data-testid="usage-cell-codex-ticket-disabled-badge"]')
+    expect(badge.attributes('title')).toBe('admin.accounts.openai.codexTurnTicketAccountDisabled')
     // 库存事实必须照常展示，不能因为停用就假装没票。
     expect(wrapper.text()).toContain('42m00s')
 
@@ -145,9 +144,7 @@ describe('AccountUsageCell', () => {
         ],
       },
     })
-    const enabled = wrapper.get('[data-testid="usage-cell-codex-tickets"]')
-    expect(enabled.classes()).not.toContain('opacity-60')
-    expect(enabled.attributes('title')).toBeUndefined()
+    expect(wrapper.find('[data-testid="usage-cell-codex-ticket-disabled-badge"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

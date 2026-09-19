@@ -280,6 +280,13 @@ func TestRefreshOpenAICodexTickets_RespectsOptOutWhileQueued(t *testing.T) {
 			r.setLatest(func(a *Account) { a.Schedulable = false })
 		}},
 		{"账号已被删除", func(r *codexTicketRevokeRepo) {
+			// 生产 repo 找不到账号时返回 ErrAccountNotFound，不是 (nil, nil)。
+			// 桩必须照这个形状来，否则测不到真实的删除路径。
+			r.mu.Lock()
+			r.getErr = ErrAccountNotFound
+			r.mu.Unlock()
+		}},
+		{"账号已被删除且 repo 返回空值", func(r *codexTicketRevokeRepo) {
 			r.mu.Lock()
 			r.gone = true
 			r.mu.Unlock()
@@ -351,6 +358,21 @@ func TestRefreshOpenAICodexTickets_RechecksAfterQueueing(t *testing.T) {
 	release := make(chan struct{})
 	upstream := &codexTicketBarrierUpstream{firstInFlight: firstInFlight, release: release}
 
+	// B 到达取槽边界的同步点。没有它的话，B 有可能在撤销之后才被调度到——那时
+	// 即便复核被错误地放在取槽之前，B 也会读到已撤销的状态并取消，测试就成了偶然
+	// 通过。等 GetByID 至少被调用过一次（A 的那次）再撤销，确保 B 的排队已经发生
+	// 在撤销之前。
+	waitForQueued := func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if repo.getCalls.Load() >= 1 {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("第二发探测未在预期时间内进入排队")
+	}
+
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
 		Enabled:            true,
 		HarvestLoopEnabled: true,
@@ -373,6 +395,7 @@ func TestRefreshOpenAICodexTickets_RechecksAfterQueueing(t *testing.T) {
 	}
 
 	// A 占着唯一的并发槽，B 正在排队。此刻撤销。
+	waitForQueued()
 	repo.setLatest(func(a *Account) {
 		a.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: false}
 	})

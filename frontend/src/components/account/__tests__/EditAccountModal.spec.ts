@@ -1380,7 +1380,9 @@ describe('EditAccountModal', () => {
   })
 
   // 门票三态的持久化语义：inherit=删键（后端缺键即继承全局）、on/off=落 boolean。
-  // 这三条一起钉住"继承"不能退化成写死的 true——否则全局关掉后账号仍在跑。
+  // 注意后端把显式 true 和缺键同等对待（都参与，且都仍受全局开关约束），所以 on 与
+  // inherit 在行为上等价，差别只是意图是否被显式记录。这几条钉的是"inherit 必须真的
+  // 删键"：一旦退化成写死 true，日后若默认值改成不参与，这批账号会被静默带回参与态。
   it('门票开关选择「继承全局」时不落键', async () => {
     const account = buildAccount()
     account.type = 'oauth'

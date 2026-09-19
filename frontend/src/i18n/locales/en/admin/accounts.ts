@@ -674,9 +674,12 @@ export default {
         codexTurnTicketReady: '{time} left',
         codexTurnTicketPaused: 'No 292 ticket; this model is paused',
         codexTurnTicketAccountDisabled: 'Account opted out of tickets; not injected',
+        codexTurnTicketAccountDisabledShort: 'not injected',
         codexTurnTicketEnabled: 'Ticket mechanism',
         codexTurnTicketEnabledDesc:
-          'Whether this account participates in the ticket mechanism (harvest and injection). "Inherit global" follows the global switch; "Off" means neither harvesting nor injecting, leaving this account\'s requests untouched.',
+          'Whether this account participates in the ticket mechanism (harvest and injection). "Off" means neither harvesting nor injecting, leaving this account\'s requests untouched. Note that "On" does not override the global switch: with the global switch off this account stays out either way, so "On" differs from "Inherit global" only by recording the intent explicitly.',
+        codexTurnTicketEnabledBulkDesc:
+          'Bulk edit supports only an explicit On or Off; leaving the box unchecked keeps the current value. To restore "Inherit global", edit the account individually. "On" likewise does not override the global switch.',
         codexTurnTicketEnabledInherit: 'Inherit global',
         codexTurnTicketEnabledOn: 'On',
         codexTurnTicketEnabledOff: 'Off',

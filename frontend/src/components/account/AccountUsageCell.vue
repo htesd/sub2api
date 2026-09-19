@@ -120,13 +120,18 @@
     <template v-else-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token')">
       <!-- 账号退出门票机制时整块降透明度 + title 提示：库存票仍如实展示（ready 不清），
            但不会被注入，所以是叠加态而非替换某个分支。 -->
-      <div
-        v-if="codexTurnTickets.length"
-        class="mb-1 space-y-0.5"
-        :class="codexTurnTicketAccountDisabled ? 'opacity-60' : ''"
-        :title="codexTurnTicketAccountDisabled ? t('admin.accounts.openai.codexTurnTicketAccountDisabled') : undefined"
-        data-testid="usage-cell-codex-tickets"
-      >
+      <div v-if="codexTurnTickets.length" class="mb-1 space-y-0.5" data-testid="usage-cell-codex-tickets">
+        <!-- 可见标签而非仅靠透明度：列表里绿色倒计时照常展示（库存是事实），但必须让
+             管理员一眼看出这些票不会被注入。不用父级 title，因为模型名自己的 title
+             会把父级提示盖掉。 -->
+        <div
+          v-if="codexTurnTicketAccountDisabled"
+          class="inline-flex items-center rounded bg-gray-100 px-1 text-[10px] leading-4 text-gray-500 dark:bg-dark-700 dark:text-gray-400"
+          :title="t('admin.accounts.openai.codexTurnTicketAccountDisabled')"
+          data-testid="usage-cell-codex-ticket-disabled-badge"
+        >
+          {{ t('admin.accounts.openai.codexTurnTicketAccountDisabledShort') }}
+        </div>
         <div
           v-for="ticket in codexTurnTickets"
           :key="ticket.model"

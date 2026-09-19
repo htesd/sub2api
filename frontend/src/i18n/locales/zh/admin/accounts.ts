@@ -752,9 +752,12 @@ export default {
         codexTurnTicketReady: '剩余 {time}',
         codexTurnTicketPaused: '未打到 292，该模型已暂停',
         codexTurnTicketAccountDisabled: '该账号已退出门票机制，不会注入',
+        codexTurnTicketAccountDisabledShort: '不注入',
         codexTurnTicketEnabled: '门票机制',
         codexTurnTicketEnabledDesc:
-          '控制本账号是否参与门票机制（采集与注入）。"继承全局"跟随全局开关；"关闭"表示既不采集也不注入，该账号的请求保持原样。',
+          '控制本账号是否参与门票机制（采集与注入）。"关闭"表示既不采集也不注入，该账号的请求保持原样。注意"开启"不会越过全局开关——全局关闭时本账号同样不参与，它与"继承全局"的差别只是把意图显式记录下来。',
+        codexTurnTicketEnabledBulkDesc:
+          '批量编辑只支持显式开启或关闭；不勾选表示保持原值。需要恢复"继承全局"请单独编辑账号。同样地，"开启"不会越过全局开关。',
         codexTurnTicketEnabledInherit: '继承全局',
         codexTurnTicketEnabledOn: '开启',
         codexTurnTicketEnabledOff: '关闭',

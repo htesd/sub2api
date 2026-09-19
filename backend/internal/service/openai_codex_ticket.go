@@ -937,6 +937,14 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 	}
 	latest, err := s.accountRepo.GetByID(ctx, account.ID)
 	switch {
+	// 账号已删除要单独归类：生产 repo 在找不到时返回 ErrAccountNotFound 而不是
+	// (nil, nil)，若只判 latest == nil，真实的删除会被算进"查询失败"，掩盖掉
+	// "这个号已经没了"这个确定结论。
+	case errors.Is(err, ErrAccountNotFound):
+		logger.L().Info("openai_codex_ticket probe cancelled",
+			zap.Int64("account_id", account.ID), zap.String("model", model),
+			zap.String("reason", "account_gone_while_queued"))
+		return
 	case err != nil:
 		logger.L().Info("openai_codex_ticket probe cancelled",
 			zap.Int64("account_id", account.ID), zap.String("model", model),

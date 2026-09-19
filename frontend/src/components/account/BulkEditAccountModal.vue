@@ -986,7 +986,7 @@
         </div>
         <div :class="!enableCodexTicketEnabled && 'pointer-events-none opacity-50'">
           <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
-            {{ t('admin.accounts.openai.codexTurnTicketEnabledDesc') }}
+            {{ t('admin.accounts.openai.codexTurnTicketEnabledBulkDesc') }}
           </p>
           <!-- 批量路径没有"继承全局"档：JSONB 顶层合并语义下删键只表示"本次不更新"，
                清不掉账号上已有的 true/false，无法表达"回到继承"。只给开/关两档。 -->
@@ -2155,7 +2155,14 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   // JSONB 顶层合并只处理 payload 里出现的键，删键清不掉账号上已有的值。
   if (enableCodexTicketEnabled.value) {
     const extra = ensureExtra()
-    extra.codex_ticket_enabled = codexTicketEnabledValue.value === 'on'
+    const enabled = codexTicketEnabledValue.value === 'on'
+    extra.codex_ticket_enabled = enabled
+    // 关闭总开关时必须把子键一并落成 false。批量合并清不掉已有键，若放着不管，
+    // 账号上残留的 codex_ticket_active_probe=true 会在管理员日后重新开启总开关时
+    // 让主动打票意外恢复——一个没人点过的开关自己开了。Edit 表单靠删键达到同一效果。
+    if (!enabled) {
+      extra.codex_ticket_active_probe = false
+    }
   }
   if (enableCodexTicketActiveProbe.value) {
     const extra = ensureExtra()

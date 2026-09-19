@@ -963,9 +963,12 @@ describe('BulkEditAccountModal', () => {
     await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
     await flushPromises()
 
+    // 关闭总开关必须连带把子键落成 false：批量合并清不掉残留的 true，否则日后
+    // 重新开启总开关时主动打票会自己恢复。
     expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
       extra: {
-        codex_ticket_enabled: false
+        codex_ticket_enabled: false,
+        codex_ticket_active_probe: false
       }
     })
   })
