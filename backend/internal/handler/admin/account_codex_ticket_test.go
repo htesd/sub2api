@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"time"
+
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
@@ -8,7 +10,15 @@ import (
 )
 
 func TestAccountResponseCodexTicketsUsesConfiguredPolicy(t *testing.T) {
-	account := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}
+	// fail_closed 的阻断需要该号显式开启主动探测（codex_ticket_active_probe），
+	// 否则票只能来自被动采集，拦它即自举死锁。
+	lastUsed := time.Now().Add(-time.Minute)
+	account := &service.Account{
+		ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		LastUsedAt:  &lastUsed,
+		Credentials: map[string]any{"plan_type": "pro"},
+		Extra:       map[string]any{"codex_ticket_active_probe": true},
+	}
 	h := &AccountHandler{cfg: &config.Config{}}
 	require.Empty(t, h.accountResponseFromService(account).CodexTurnTickets)
 	require.Empty(t, h.accountListResponseFromService(account).CodexTurnTickets)

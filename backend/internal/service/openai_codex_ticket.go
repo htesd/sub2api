@@ -59,6 +59,14 @@ const (
 	openAICodexTicketPlanExtraKey    = "codex_ticket_plan"
 	openAICodexTicketDefaultModel    = "gpt-6-astra"
 	openAICodexTicketDefaultSolModel = "gpt-5.6-sol"
+
+	// openAICodexTicketEnabledExtraKey 账号级总开关。缺省=继承全局；
+	// false=该号完全不参与（既不采集也不注入）。
+	openAICodexTicketEnabledExtraKey = "codex_ticket_enabled"
+	// openAICodexTicketActiveProbeExtraKey 账号级主动探测开关，默认 false。
+	// 主动探测会用该号凭据从与业务出口不同的 IP 发合成请求，风险显著高于被动
+	// 采集，因此必须逐号显式 opt-in。
+	openAICodexTicketActiveProbeExtraKey = "codex_ticket_active_probe"
 )
 
 // ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用的 292 门票，
@@ -133,6 +141,51 @@ func normalizeOpenAICodexTicketPlan(account *Account) string {
 		return "free"
 	}
 	return "unknown"
+}
+
+// openAICodexTicketAccountEnabled 账号级总开关：缺省继承全局，显式 false 则该号
+// 完全不参与票据机制——既不被动采集，也不注入。
+//
+// 关掉它才是真正的隔离。只关主动探测是不够的：注入同样有风险（把一张最多一小时前
+// 签发的 state 覆盖到后续请求上，其自述时间与当前会话不匹配，是可辨识异常），
+// 而注入的票可以来自被动采集。
+func openAICodexTicketAccountEnabled(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if account.Extra == nil {
+		return true
+	}
+	switch v := account.Extra[openAICodexTicketEnabledExtraKey].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "false", "0", "off", "no":
+			return false
+		case "true", "1", "on", "yes":
+			return true
+		}
+	}
+	return true
+}
+
+// openAICodexTicketAccountActiveProbeEnabled 账号级主动探测开关，默认关闭。
+// 需要同时满足全局 harvest_loop_enabled 才会真正被探测。
+func openAICodexTicketAccountActiveProbeEnabled(account *Account) bool {
+	if account == nil || account.Extra == nil {
+		return false
+	}
+	switch v := account.Extra[openAICodexTicketActiveProbeExtraKey].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "on", "yes":
+			return true
+		}
+	}
+	return false
 }
 
 // openAICodexTicketPlanKnown 判断该账号的合格长度是否有确定依据。
@@ -497,6 +550,10 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 	if s == nil || h == nil || !isOpenAICodexTicketAccount(account) || !s.openAICodexTicketEnabledContext(ctx) {
 		return nil
 	}
+	// 账号级关闭 = 不注入。这是保护特定账号（如易封的 pro 号）的唯一有效开关。
+	if !openAICodexTicketAccountEnabled(account) {
+		return nil
+	}
 	model = normalizeOpenAICodexTicketModel(model)
 	if model == "" || !s.openAICodexTicketGatedModel(model) {
 		return nil
@@ -562,8 +619,13 @@ func openAICodexTicketFailClosedEffective(account *Account, cfg config.OpenAICod
 	if !cfg.FailClosed {
 		return false
 	}
-	// 入口 1：被动采集是唯一来源。
-	if !cfg.HarvestLoopEnabled {
+	// 入口 1：该账号的票只能来自被动采集。需要全局主动探测总闸 + 该号显式 opt-in
+	// 都成立，它才真的会被探测到。死锁是按账号成立的，所以这里必须按账号判。
+	if !cfg.HarvestLoopEnabled || !openAICodexTicketAccountActiveProbeEnabled(account) {
+		return false
+	}
+	// 账号级关闭时不参与票据机制，自然也不该被 fail_closed 拦。
+	if !openAICodexTicketAccountEnabled(account) {
 		return false
 	}
 	// 入口 2：没有可用票源。这里只能判"是否配置"，代理运行时不可用无法在此判定，
@@ -763,6 +825,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	idle := 0
 	unschedulable := 0
 	ineligible := 0
+	optedOut := 0
 	for i := range accounts {
 		account := accounts[i]
 		if account.Status != StatusActive || !isOpenAICodexTicketAccount(&account) {
@@ -779,6 +842,13 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 		// free 套餐实测一律被上游 400 拒绝（无 astra/sol 权限），探测纯属白送失败。
 		if !openAICodexTicketPlanEligible(&account) {
 			ineligible++
+			continue
+		}
+		// 账号级两道开关：总开关关掉即完全隔离；主动探测默认关闭，必须逐号 opt-in。
+		// 主动探测用该号凭据从与业务出口不同的 IP 发合成请求，风险远高于被动采集，
+		// 所以全局 harvest_loop_enabled 打开也只碰显式勾选的号。
+		if !openAICodexTicketAccountEnabled(&account) || !openAICodexTicketAccountActiveProbeEnabled(&account) {
+			optedOut++
 			continue
 		}
 		for _, model := range cfg.Models {
@@ -827,6 +897,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 			zap.Int("probed", probed), zap.Int("backoff_skipped", skipped),
 			zap.Int("idle_skipped", idle), zap.Int("unschedulable_skipped", unschedulable),
 			zap.Int("plan_ineligible_skipped", ineligible),
+			zap.Int("opted_out_skipped", optedOut),
 			zap.Int("concurrency", cfg.HarvestConcurrency),
 			zap.Int("proxy_pool", len(SplitOpenAICodexTicketHarvestProxyPool(s.openAICodexTicketHarvestProxyURLContext(ctx)))))
 	}
@@ -1066,7 +1137,7 @@ func (s *OpenAIGatewayService) CommitOpenAICodexTicketFromResponse(ctx context.C
 	if !s.openAICodexTicketPassiveCaptureEnabled() || !s.openAICodexTicketEnabledContext(ctx) {
 		return
 	}
-	if !isOpenAICodexTicketAccount(account) {
+	if !isOpenAICodexTicketAccount(account) || !openAICodexTicketAccountEnabled(account) {
 		return
 	}
 	model := normalizeOpenAICodexTicketModel(outboundModel)

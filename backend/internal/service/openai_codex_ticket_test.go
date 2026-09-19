@@ -33,6 +33,9 @@ func ticketTestAccount(id int64) *Account {
 		Schedulable: true,
 		LastUsedAt:  &lastUsed,
 		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1", "plan_type": "pro"},
+		// 主动探测与 fail_closed 均需账号级 opt-in（codex_ticket_active_probe），
+		// 默认关闭。涉及这两者的 fixture 必须显式开启，否则测的不是目标行为。
+		Extra: map[string]any{openAICodexTicketActiveProbeExtraKey: true},
 	}
 }
 
@@ -385,14 +388,15 @@ func (u *codexTicketConcurrentUpstream) Do(req *http.Request, _ string, _ int64,
 func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *testing.T) {
 	account := ticketTestAccount(41)
 	account.Status = StatusActive
-	account.Extra = map[string]any{"existing": true}
+	// 覆盖 Extra 时必须保留主动探测 opt-in，否则采集循环会跳过该号。
+	account.Extra = map[string]any{"existing": true, openAICodexTicketActiveProbeExtraKey: true}
 	repo := &codexTicketRefreshRepo{accounts: []Account{*account}}
 	upstream := &codexTicketConcurrentUpstream{ready: make(chan struct{})}
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
 	svc.accountRepo = repo
 	svc.refreshOpenAICodexTickets(context.Background())
 	require.Equal(t, int64(2), upstream.started.Load())
-	require.Equal(t, map[string]any{"existing": true}, account.Extra)
+	require.Equal(t, map[string]any{"existing": true, openAICodexTicketActiveProbeExtraKey: true}, account.Extra)
 	require.Len(t, repo.updates, 2)
 	for _, model := range []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel} {
 		ticket := svc.lookupOpenAICodexTicket(account, model)

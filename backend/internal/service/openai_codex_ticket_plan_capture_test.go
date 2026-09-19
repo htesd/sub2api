@@ -243,6 +243,7 @@ func TestOpenAICodexTicketFailClosedGuardsAllBootstrapDeadlocks(t *testing.T) {
 	activePro := func() *Account {
 		a := accountWithPlan("pro")
 		a.LastUsedAt = &recent
+		a.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 		return a
 	}
 
@@ -258,15 +259,18 @@ func TestOpenAICodexTicketFailClosedGuardsAllBootstrapDeadlocks(t *testing.T) {
 
 	idle := accountWithPlan("pro")
 	idle.LastUsedAt = &stale
+	idle.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 	assert.False(t, openAICodexTicketFailClosedEffective(idle, base, true, now),
 		"入口3：主动循环按 idle 跳过它，而拒发让它永远无法变活跃")
 
 	never := accountWithPlan("pro")
+	never.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 	assert.False(t, openAICodexTicketFailClosedEffective(never, base, true, now),
 		"入口3：从未使用过的新账号同理")
 
 	free := accountWithPlan("free")
 	free.LastUsedAt = &recent
+	free.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 	assert.False(t, openAICodexTicketFailClosedEffective(free, base, true, now),
 		"入口4：free 套餐被上游一律 400，探测多少次都拿不到票")
 
@@ -283,6 +287,7 @@ func TestOpenAICodexTicketStatusesBlockedMatchesRuntime(t *testing.T) {
 	account.Platform = PlatformOpenAI
 	account.Type = AccountTypeOAuth
 	account.LastUsedAt = &recent
+	account.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 
 	passiveOnly := config.OpenAICodexTicketConfig{
 		Enabled: true, FailClosed: true, HarvestLoopEnabled: false,
@@ -373,6 +378,7 @@ func TestOpenAICodexTicketFailClosedTreatsConfiguredProxyAsSource(t *testing.T) 
 	recent := now.Add(-time.Minute)
 	account := accountWithPlan("pro")
 	account.LastUsedAt = &recent
+	account.Extra = map[string]any{openAICodexTicketActiveProbeExtraKey: true}
 	cfg := NormalizeOpenAICodexTicketConfig(config.OpenAICodexTicketConfig{
 		FailClosed: true, HarvestLoopEnabled: true,
 	})
@@ -381,4 +387,68 @@ func TestOpenAICodexTicketFailClosedTreatsConfiguredProxyAsSource(t *testing.T) 
 		"未配置代理视为无票源")
 	assert.True(t, openAICodexTicketFailClosedEffective(account, cfg, true, now),
 		"已配置即视为有票源——运行时连通性无法在此判定，属已知限制")
+}
+
+// —— 账号级开关 ——
+
+func TestOpenAICodexTicketAccountEnabledDefaultsToInherit(t *testing.T) {
+	assert.True(t, openAICodexTicketAccountEnabled(&Account{}), "缺省继承全局")
+	assert.True(t, openAICodexTicketAccountEnabled(&Account{Extra: map[string]any{}}))
+	assert.False(t, openAICodexTicketAccountEnabled(nil))
+
+	off := &Account{Extra: map[string]any{openAICodexTicketEnabledExtraKey: false}}
+	assert.False(t, openAICodexTicketAccountEnabled(off), "显式 false 必须关闭")
+
+	// 前端/导入可能写成字符串
+	assert.False(t, openAICodexTicketAccountEnabled(
+		&Account{Extra: map[string]any{openAICodexTicketEnabledExtraKey: "false"}}))
+	assert.True(t, openAICodexTicketAccountEnabled(
+		&Account{Extra: map[string]any{openAICodexTicketEnabledExtraKey: "true"}}))
+	assert.True(t, openAICodexTicketAccountEnabled(
+		&Account{Extra: map[string]any{openAICodexTicketEnabledExtraKey: "garbage"}}),
+		"无法识别的值按继承处理，不静默关闭")
+}
+
+// 主动探测风险远高于被动采集，必须逐号 opt-in。
+func TestOpenAICodexTicketActiveProbeDefaultsOff(t *testing.T) {
+	assert.False(t, openAICodexTicketAccountActiveProbeEnabled(&Account{}), "默认必须关闭")
+	assert.False(t, openAICodexTicketAccountActiveProbeEnabled(nil))
+	assert.False(t, openAICodexTicketAccountActiveProbeEnabled(
+		&Account{Extra: map[string]any{}}))
+
+	on := &Account{Extra: map[string]any{openAICodexTicketActiveProbeExtraKey: true}}
+	assert.True(t, openAICodexTicketAccountActiveProbeEnabled(on))
+	assert.True(t, openAICodexTicketAccountActiveProbeEnabled(
+		&Account{Extra: map[string]any{openAICodexTicketActiveProbeExtraKey: "true"}}))
+	assert.False(t, openAICodexTicketAccountActiveProbeEnabled(
+		&Account{Extra: map[string]any{openAICodexTicketActiveProbeExtraKey: "maybe"}}),
+		"无法识别的值按关闭处理（风险方向保守）")
+}
+
+// fail_closed 现在按账号判定：没勾选主动探测的号，票只能来自被动采集，拦它即死锁。
+func TestOpenAICodexTicketFailClosedRequiresPerAccountActiveProbe(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-time.Minute)
+	cfg := NormalizeOpenAICodexTicketConfig(config.OpenAICodexTicketConfig{
+		FailClosed: true, HarvestLoopEnabled: true,
+	})
+
+	mk := func(extra map[string]any) *Account {
+		a := accountWithPlan("pro")
+		a.LastUsedAt = &recent
+		a.Extra = extra
+		return a
+	}
+
+	assert.False(t, openAICodexTicketFailClosedEffective(mk(nil), cfg, true, now),
+		"未勾选主动探测的号：票只能被动来，拦它就是死锁")
+	assert.True(t, openAICodexTicketFailClosedEffective(
+		mk(map[string]any{openAICodexTicketActiveProbeExtraKey: true}), cfg, true, now),
+		"勾选主动探测且票源具备：fail_closed 生效")
+	assert.False(t, openAICodexTicketFailClosedEffective(
+		mk(map[string]any{
+			openAICodexTicketActiveProbeExtraKey: true,
+			openAICodexTicketEnabledExtraKey:     false,
+		}), cfg, true, now),
+		"账号级总开关关掉时不参与票据机制，也不该被 fail_closed 拦")
 }
