@@ -672,9 +672,23 @@ export default {
         codexTurnTicketDesc: 'Ticket status for the configured models. Requests are paused without a valid ticket only when fail-closed is enabled.',
         codexTurnTicketMissing: 'No valid ticket; requests remain allowed',
         codexTurnTicketReady: '{time} left',
-        codexTurnTicketPaused: 'No 292 ticket; this model is paused',
+        codexTurnTicketPaused: 'No valid ticket; business paused by policy. Active probing runs independently.',
         codexTurnTicketAccountDisabled: 'Account opted out of tickets; not injected',
         codexTurnTicketAccountDisabledShort: 'not injected',
+        codexTicketSource: {
+          accountProxy: 'Account proxy',
+          accountProxyDesc: 'Actively harvested through the proxy assigned to this account at capture time.',
+          previousProxy: 'Previous proxy config',
+          previousProxyDesc: 'The proxy assignment or configuration was updated after capture. The badge shows its original ID; a config update does not necessarily mean the egress changed.',
+          harvestPool: 'Other proxy',
+          harvestPoolDesc: 'Harvested through the separate proxy pool instead of the proxy assigned to this account.',
+          businessResponse: 'Business capture',
+          businessResponseDesc: 'Captured from a real business response; its actual public egress IP was not separately verified.',
+          unknown: 'Unknown source',
+          unknownDesc: 'No source was recorded. Historical tickets are not assumed to come from the account proxy.',
+          riskHint: 'Review cross-egress activity for this account, especially Pro20 accounts. This label does not establish a cause of account suspension.',
+          scopeHint: 'Describes the latest stored ticket, not the history of cross-egress attempts. The same proxy configuration does not guarantee the same public IP.'
+        },
         codexTurnTicketEnabled: 'Ticket mechanism',
         codexTurnTicketEnabledDesc:
           'Whether this account participates in the ticket mechanism (harvest and injection). "Off" means neither harvesting nor injecting, leaving this account\'s requests untouched. Note that "On" does not override the global switch: with the global switch off this account stays out either way, so "On" differs from "Inherit global" only by recording the intent explicitly.',
@@ -685,7 +699,7 @@ export default {
         codexTurnTicketEnabledOff: 'Off',
         codexTurnTicketActiveProbe: 'Active probing',
         codexTurnTicketActiveProbeDesc:
-          'Allow the background loop to send synthetic requests for this account solely to obtain a ticket. Off by default: passive capture adds no upstream requests, while active probing consumes quota and adds extra traffic signal. Also requires harvest_loop_enabled in the config file.',
+          'Allow synthetic ticket probes for this account. Each cycle tries the account proxy first, then at most one different pool proxy on failure. The account proxy works without a harvest pool. Off by default and consumes quota; the global background probing switch must also be on. Ticket-required models need active harvesting for their first ticket because business requests are blocked.',
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:
           'Controls the hosted image_generation bridge and client-declared image tools on Codex /responses text requests. Hosted auto-injection applies only to non-Responses Lite requests. Account policy takes precedence over channel and global settings; standalone image-generation endpoints are unaffected.',

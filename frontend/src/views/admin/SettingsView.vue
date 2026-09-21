@@ -4516,6 +4516,18 @@
                     v-model="form.openai_codex_ticket_enabled"
                   />
                 </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexTicketHarvestLoop") }}</h3>
+                    <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexTicketHarvestLoopDesc") }}</p>
+                  </div>
+                  <Toggle id="codex-ticket-harvest-loop" v-model="form.openai_codex_ticket_harvest_loop_enabled" />
+                </div>
+                <div>
+                  <label for="codex-ticket-required-models" class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexTicketRequiredModels") }}</label>
+                  <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexTicketRequiredModelsDesc") }}</p>
+                  <textarea id="codex-ticket-required-models" v-model="form.openai_codex_ticket_required_models" class="input mt-3 w-full font-mono text-sm" rows="3" placeholder="gpt-6-astra" />
+                </div>
                 <div>
                   <h3 class="text-base font-semibold text-gray-900 dark:text-white">
                     {{ t("admin.settings.gatewayForwarding.codexTicketHarvestProxy") }}
@@ -9878,6 +9890,8 @@ const form = reactive<SettingsForm>({
   openai_codex_client_version_synced: "",
   openai_codex_version_auto_sync_enabled: true,
   openai_codex_ticket_enabled: false,
+  openai_codex_ticket_harvest_loop_enabled: false,
+  openai_codex_ticket_required_models: "",
   openai_codex_ticket_harvest_proxy_url: "",
   openai_codex_ticket_harvest_proxy_configured: false,
   // codex_cli_only 加固
@@ -11487,6 +11501,8 @@ async function saveSettings() {
       openai_codex_version_auto_sync_enabled:
         form.openai_codex_version_auto_sync_enabled,
       openai_codex_ticket_enabled: form.openai_codex_ticket_enabled,
+      openai_codex_ticket_harvest_loop_enabled: form.openai_codex_ticket_harvest_loop_enabled,
+      openai_codex_ticket_required_models: form.openai_codex_ticket_required_models,
       openai_codex_ticket_harvest_proxy_url:
         form.openai_codex_ticket_harvest_proxy_url?.trim() || "",
       min_codex_version: form.min_codex_version?.trim() || "",

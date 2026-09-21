@@ -16,6 +16,19 @@ type codexTicketSettingRepo struct {
 	err error
 }
 
+func (r *codexTicketSettingRepo) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	values := map[string]string{}
+	for _, key := range keys {
+		if v, ok := r.values[key]; ok {
+			values[key] = v
+		}
+	}
+	return values, nil
+}
+
 func (r *codexTicketSettingRepo) GetValue(ctx context.Context, key string) (string, error) {
 	if r.err != nil {
 		return "", r.err

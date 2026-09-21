@@ -332,15 +332,18 @@ gateway:
     refresh_before_seconds: 600
     # 被动采集：从真实业务响应头捕获 turn-state，且只在上游自报响应模型与出站
     # 模型一致（本回合未被降级）时落库。零额外请求、走账号自己的业务出口 IP，
-    # 是票据的主路径，默认开启。
+    # 默认开启；无票拒发的模型需要主动打票获取首票，不能依赖被拦住的业务流量。
     passive_capture_enabled: true
-    # 后台主动探测循环，默认关闭。它用账号凭据从与业务出口不同的 IP（通常是机房
-    # IP）发合成请求，在上游看来同一账号周期性跨 ASN 跳变，本身即关联特征。
+    # 后台主动探测循环，默认关闭。每轮优先用账号绑定代理，失败后最多再试一个池代理。
+    # 全局总闸和账号主动探测开关都开启才会发请求。
     harvest_loop_enabled: false
+    # 后台设置可热更新上述主动探测总闸。无票拒发名单独立于探测开关：
+    # 名单内无票拒发，名单外无票正常转发；后台显式清空表示全部放行。
+    # required_models: ["gpt-6-astra"]
     # 后台「系统设置 → 网关 → Codex 设置」可覆盖此值，无需重启。
     # 后台值的读取缓存为 5 秒，下个探测周期使用新代理。
-    # 支持逗号分隔的代理池，按发轮换；返回非合格长度（出口已被降智）的代理会被
-    # 冷却 harvest_proxy_burn_cooldown_seconds 秒后再参与轮换。
+    # 支持逗号分隔的兜底代理池，未配池时仍可走账号代理；无账号代理时只走此池，不新增直连。
+    # 池中返回非合格票的代理降低优先级，冷却时长见 harvest_proxy_burn_cooldown_seconds。
     harvest_proxy_url: ""
     harvest_probe_interval_seconds: 6
     harvest_attempt_timeout_seconds: 25
@@ -350,7 +353,7 @@ gateway:
     # 会按 probe_interval 永久重试，既烧采集 IP 又给上游持续失败信号。
     harvest_backoff_base_seconds: 30
     harvest_backoff_max_seconds: 900
-    # 只给该窗口内跑过流量的账号打票（按 accounts.last_used_at）。
+    # 名单外模型只给该窗口内跑过流量的账号打票；无票拒发名单模型不受活跃窗口限制。
     # 取值 0（未配置）归一成 86400；要关闭该过滤请显式设为负数。
     harvest_active_window_seconds: 86400
     # 代理返回非合格长度后的冷却时长。

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,39 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSettingsCodexTicketPolicyWriteReadAndClear(t *testing.T) {
+	loop := service.SettingKeyOpenAICodexTicketHarvestLoopEnabled
+	models := service.SettingKeyOpenAICodexTicketRequiredModels
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{loop: "false", models: "gpt-6-astra"})
+	cfg := config.OpenAICodexTicketConfig{FailClosed: true}
+	require.False(t, h.settingService.ResolveOpenAICodexTicketConfig(context.Background(), cfg).HarvestLoopEnabled)
+	rec := doUpdateSettings(t, h, map[string]any{loop: true, models: "gpt-6-astra\ngpt-6-astra"}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "gpt-6-astra", repo.values[models])
+	effective := h.settingService.ResolveOpenAICodexTicketConfig(context.Background(), cfg)
+	require.True(t, effective.HarvestLoopEnabled)
+	require.Equal(t, []string{"gpt-6-astra"}, effective.RequiredModels)
+	rec = doUpdateSettings(t, h, map[string]any{"site_name": "preserve-policy"}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "true", repo.values[loop])
+	require.Equal(t, "gpt-6-astra", repo.values[models])
+	rec = doUpdateSettings(t, h, map[string]any{loop: false, models: ""}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	effective = h.settingService.ResolveOpenAICodexTicketConfig(context.Background(), cfg)
+	require.False(t, effective.HarvestLoopEnabled)
+	require.NotNil(t, effective.RequiredModels)
+	require.Empty(t, effective.RequiredModels)
+	require.Contains(t, rec.Body.String(), `"openai_codex_ticket_required_models":""`)
+}
+
+func TestSettingsCodexTicketOmittedPolicyPreservesUnset(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	rec := doUpdateSettings(t, h, map[string]any{"site_name": "unrelated"}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, repo.values, service.SettingKeyOpenAICodexTicketRequiredModels)
+	require.NotContains(t, repo.values, service.SettingKeyOpenAICodexTicketHarvestLoopEnabled)
+}
 
 func TestSettingsCodexTicketProxyWriteReadAndHotReload(t *testing.T) {
 	key := service.SettingKeyOpenAICodexTicketHarvestProxyURL

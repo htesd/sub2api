@@ -426,7 +426,7 @@ func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *te
 	account.Extra = map[string]any{"existing": true, openAICodexTicketActiveProbeExtraKey: true}
 	repo := &codexTicketRefreshRepo{accounts: []Account{*account}}
 	upstream := &codexTicketConcurrentUpstream{ready: make(chan struct{})}
-	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestLoopEnabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
 	svc.accountRepo = repo
 	svc.refreshOpenAICodexTickets(context.Background())
 	require.Equal(t, int64(2), upstream.started.Load())

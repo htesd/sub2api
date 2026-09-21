@@ -1438,6 +1438,20 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.codex_ticket_active_probe).toBe(true)
   })
 
+  it('在编辑面板区分原代理票和其他代理票', () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.proxy_id = 100
+    account.codex_turn_tickets = [
+      { model: 'gpt-6-astra', ready: true, remaining_seconds: 120, blocked: false, source: 'account_proxy', source_proxy_id: 100 },
+      { model: 'gpt-5.6-sol', ready: true, remaining_seconds: 120, blocked: false, source: 'harvest_pool' }
+    ]
+    const wrapper = mountModal(account)
+    expect(wrapper.get('[data-source="accountProxy"]').text()).toContain('#100')
+    expect(wrapper.get('[data-source="harvestPool"]').classes()).toContain('bg-amber-100')
+    wrapper.unmount()
+  })
+
   it('submits Codex image tool force-inject mode as bridge override', async () => {
     const account = buildAccount()
     account.extra = {

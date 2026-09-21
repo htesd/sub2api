@@ -544,11 +544,15 @@ export default {
         openaiCodexVersionSyncedValue: 'Currently synced: {version}',
         codexHardeningTitle: "Codex Settings",
         codexTicketEnabled: "292 ticket harvest",
+        codexTicketHarvestLoop: "Background active probing",
+        codexTicketHarvestLoopDesc: "Hot-updated on save, without a restart. Sends synthetic requests only for accounts that opt in, consuming upstream quota. Requests already sent may finish after disabling.",
+        codexTicketRequiredModels: "Models requiring a ticket",
+        codexTicketRequiredModelsDesc: "Exact outbound model names, separated by commas or newlines. Hot-updated on save. Listed models require a valid ticket; other models can forward without one. Empty means allow all. Disabling active probing does not lift this restriction. Listed models are automatically included in harvesting; account-level opt-in is still required.",
         codexTicketEnabledDesc:
           "When off, the gateway neither harvests nor injects x-codex-turn-state and forwards traffic as usual. When on, it harvests tickets in the background and overwrites that header on production requests.",
-        codexTicketHarvestProxy: "292 harvest proxy",
+        codexTicketHarvestProxy: "Harvest fallback proxy pool",
         codexTicketHarvestProxyDesc:
-          "Used only for minting 292 tickets when the ticket feature is enabled. Changes apply to subsequent probes without a restart. Production traffic still uses each account's residential proxy. Paste a full HTTP or SOCKS5h proxy URL including username and password. The proxy provider must handle IP rotation. Leave blank when saving to keep the stored value.",
+          "Each active cycle tries the account proxy first, then at most one different pool proxy on failure. Accounts without a proxy use this pool directly. An account proxy can harvest without a pool. Enter full HTTP or SOCKS5h URLs separated by commas or newlines. Changes apply without a restart; blank keeps the stored value. Ticket sources appear on the account page.",
         codexTicketHarvestProxyPlaceholder: "http://user:pass{'@'}proxy.example.com:1080",
         codexTicketHarvestProxyConfigured: "Configured (password hidden). Paste a full new proxy URL to replace it.",
         codexClientRestrictionTitle: "Codex client restriction",

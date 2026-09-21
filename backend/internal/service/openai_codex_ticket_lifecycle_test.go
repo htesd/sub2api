@@ -100,6 +100,10 @@ type codexTicketLifecycleSettings struct {
 	get func(context.Context, string) (string, error)
 }
 
+func (r *codexTicketLifecycleSettings) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (r *codexTicketLifecycleSettings) GetValue(ctx context.Context, key string) (string, error) {
 	return r.get(ctx, key)
 }

@@ -1178,6 +1178,9 @@ export interface Account {
     // 但不会被注入。后端带 omitempty，false 时字段缺失，判定必须用 === true。
     account_disabled?: boolean
     expires_at?: string
+    source?: 'account_proxy' | 'harvest_pool' | 'business_response' | 'unknown'
+    source_proxy_id?: number
+    source_proxy_changed?: boolean
   }>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {

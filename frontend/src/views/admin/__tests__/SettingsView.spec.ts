@@ -735,6 +735,34 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
+  it("saves and clears the independent Codex probe and required-model policies", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_harvest_loop_enabled: false,
+      openai_codex_ticket_required_models: "gpt-6-astra",
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    const models = wrapper.get<HTMLTextAreaElement>("#codex-ticket-required-models");
+    expect(models.element.value).toBe("gpt-6-astra");
+    await wrapper.get("#codex-ticket-harvest-loop").setValue(true);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0]).toMatchObject({
+      openai_codex_ticket_harvest_loop_enabled: true,
+      openai_codex_ticket_required_models: "gpt-6-astra",
+    });
+    await models.setValue("");
+    await wrapper.get("#codex-ticket-harvest-loop").setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      openai_codex_ticket_harvest_loop_enabled: false,
+      openai_codex_ticket_required_models: "",
+    });
+    wrapper.unmount();
+  });
+
   it("loads the masked Codex harvest proxy and submits a replacement URL", async () => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,

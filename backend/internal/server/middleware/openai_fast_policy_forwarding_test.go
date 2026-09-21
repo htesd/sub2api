@@ -172,6 +172,10 @@ type openAIFastPolicyForwardingSettingRepo struct {
 	value string
 }
 
+func (r *openAIFastPolicyForwardingSettingRepo) GetMultiple(context.Context, []string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (r *openAIFastPolicyForwardingSettingRepo) GetValue(context.Context, string) (string, error) {
 	return r.value, nil
 }

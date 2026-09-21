@@ -2261,7 +2261,7 @@
           {{ t('admin.accounts.openai.codexTurnTicketDesc') }}
         </p>
         <div class="mt-3 space-y-1.5">
-          <div v-for="ticket in codexTurnTickets" :key="ticket.model" class="flex items-center justify-between text-sm">
+          <div v-for="ticket in codexTurnTickets" :key="ticket.model" class="flex flex-wrap items-center justify-between gap-2 text-sm">
             <span class="font-medium">{{ ticket.model }}</span>
             <span v-if="ticket.ready" class="text-emerald-600 dark:text-emerald-400">
               {{ t('admin.accounts.openai.codexTurnTicketReady', { time: formatCodexTicketRemaining(ticket.remaining_seconds) }) }}
@@ -2270,6 +2270,7 @@
               {{ t('admin.accounts.openai.codexTurnTicketPaused') }}
             </span>
             <span v-else class="text-gray-500">{{ t('admin.accounts.openai.codexTurnTicketMissing') }}</span>
+            <CodexTicketSourceBadge :ticket="ticket" :current-proxy-id="account?.proxy_id" />
           </div>
           <!-- account_disabled 与 ready 正交：库存票如实展示，但不会被注入。 -->
           <p
@@ -3136,6 +3137,7 @@ import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
+import CodexTicketSourceBadge from '@/components/account/CodexTicketSourceBadge.vue'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,

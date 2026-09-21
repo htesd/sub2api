@@ -750,9 +750,23 @@ export default {
         codexTurnTicketDesc: '显示已配置模型的门票状态。仅在启用缺票拦截时，没有有效门票的模型才会暂停调度。',
         codexTurnTicketMissing: '暂无有效门票，仍允许请求',
         codexTurnTicketReady: '剩余 {time}',
-        codexTurnTicketPaused: '未打到 292，该模型已暂停',
+        codexTurnTicketPaused: '无合格门票，按名单暂停业务；主动打票独立运行',
         codexTurnTicketAccountDisabled: '该账号已退出门票机制，不会注入',
         codexTurnTicketAccountDisabledShort: '不注入',
+        codexTicketSource: {
+          accountProxy: '原代理获取',
+          accountProxyDesc: '这张票由主动探测通过采集时账号绑定的代理获取。',
+          previousProxy: '旧代理配置',
+          previousProxyDesc: '这张票采集后，账号绑定的代理或该代理配置已更新；标签显示采集时的代理编号，配置更新不一定代表出口改变。',
+          harvestPool: '其他代理获取',
+          harvestPoolDesc: '这张票通过独立打票代理池获取，没有走该账号当时绑定的代理。',
+          businessResponse: '业务采集',
+          businessResponseDesc: '这张票来自真实业务响应；未单独验证该请求的实际公网出口。',
+          unknown: '来源未知',
+          unknownDesc: '尚无票据来源记录，历史票不会被推定为原代理获取。',
+          riskHint: '请关注该账号的跨出口使用情况，尤其是 Pro20 账号；此标记不代表封号原因已被证实。',
+          scopeHint: '仅描述最近保存的票，不是跨出口尝试历史。相同代理配置也不保证公网 IP 相同。'
+        },
         codexTurnTicketEnabled: '门票机制',
         codexTurnTicketEnabledDesc:
           '控制本账号是否参与门票机制（采集与注入）。"关闭"表示既不采集也不注入，该账号的请求保持原样。注意"开启"不会越过全局开关——全局关闭时本账号同样不参与，它与"继承全局"的差别只是把意图显式记录下来。',
@@ -763,7 +777,7 @@ export default {
         codexTurnTicketEnabledOff: '关闭',
         codexTurnTicketActiveProbe: '主动打票',
         codexTurnTicketActiveProbeDesc:
-          '允许后台为本账号发起合成请求来专门打票。默认关闭：被动采集不产生额外上游请求，而主动打票会消耗配额并引入额外流量特征。还需在配置文件开启 harvest_loop_enabled 总闸才会生效。',
+          '允许后台为本账号发起合成请求来专门打票。每轮优先走账号原代理，失败时最多再试一个不同的打票池代理；未配打票池也可用原代理。默认关闭，会消耗配额，还需开启系统设置中的后台主动打票总开关。无票拒发的模型必须主动获取首票，不能依赖被拦住的业务请求。',
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',

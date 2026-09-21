@@ -898,6 +898,22 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		result.OpenAICodexTicketEnabled = s.cfg.Gateway.OpenAICodexTicket.Enabled
 	}
 	result.OpenAICodexTicketHarvestProxyURL = strings.TrimSpace(settings[SettingKeyOpenAICodexTicketHarvestProxyURL])
+	result.OpenAICodexTicketPolicyLoaded = true
+	_, result.OpenAICodexTicketPolicyModelsPresent = settings[SettingKeyOpenAICodexTicketRequiredModels]
+	_, result.OpenAICodexTicketPolicyLoopPresent = settings[SettingKeyOpenAICodexTicketHarvestLoopEnabled]
+	if s.cfg != nil {
+		result.OpenAICodexTicketHarvestLoopEnabled = s.cfg.Gateway.OpenAICodexTicket.HarvestLoopEnabled
+		result.OpenAICodexTicketRequiredModels = strings.Join(s.cfg.Gateway.OpenAICodexTicket.RequiredModels, ",")
+		if s.cfg.Gateway.OpenAICodexTicket.RequiredModels == nil && s.cfg.Gateway.OpenAICodexTicket.FailClosed {
+			result.OpenAICodexTicketRequiredModels = strings.Join(NormalizeOpenAICodexTicketConfig(s.cfg.Gateway.OpenAICodexTicket).Models, ",")
+		}
+	}
+	if raw, ok := settings[SettingKeyOpenAICodexTicketHarvestLoopEnabled]; ok {
+		result.OpenAICodexTicketHarvestLoopEnabled = raw == "true"
+	}
+	if raw, ok := settings[SettingKeyOpenAICodexTicketRequiredModels]; ok {
+		result.OpenAICodexTicketRequiredModels = strings.Join(NormalizeCodexTicketRequiredModels(raw), ",")
+	}
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]

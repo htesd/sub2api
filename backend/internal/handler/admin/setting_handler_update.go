@@ -258,6 +258,8 @@ type UpdateSettingsRequest struct {
 	OpenAICodexClientVersion               *string `json:"openai_codex_client_version"`
 	OpenAICodexVersionAutoSyncEnabled      *bool   `json:"openai_codex_version_auto_sync_enabled"`
 	OpenAICodexTicketEnabled               *bool   `json:"openai_codex_ticket_enabled"`
+	OpenAICodexTicketHarvestLoopEnabled    *bool   `json:"openai_codex_ticket_harvest_loop_enabled"`
+	OpenAICodexTicketRequiredModels        *string `json:"openai_codex_ticket_required_models"`
 	OpenAICodexTicketHarvestProxyURL       string  `json:"openai_codex_ticket_harvest_proxy_url"`
 
 	// codex_cli_only 加固（global-only）
@@ -498,6 +500,13 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+	// 新策略需要保留“尚未配置”与“显式清空”的区别。
+	if req.OpenAICodexTicketRequiredModels == nil {
+		omitted[service.SettingKeyOpenAICodexTicketRequiredModels] = struct{}{}
+	}
+	if req.OpenAICodexTicketHarvestLoopEnabled == nil {
+		omitted[service.SettingKeyOpenAICodexTicketHarvestLoopEnabled] = struct{}{}
+	}
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
 	if err != nil {
@@ -1776,6 +1785,18 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAICodexTicketEnabled
 		}(),
+		OpenAICodexTicketHarvestLoopEnabled: func() bool {
+			if req.OpenAICodexTicketHarvestLoopEnabled != nil {
+				return *req.OpenAICodexTicketHarvestLoopEnabled
+			}
+			return previousSettings.OpenAICodexTicketHarvestLoopEnabled
+		}(),
+		OpenAICodexTicketRequiredModels: func() string {
+			if req.OpenAICodexTicketRequiredModels != nil {
+				return *req.OpenAICodexTicketRequiredModels
+			}
+			return previousSettings.OpenAICodexTicketRequiredModels
+		}(),
 		OpenAICodexTicketHarvestProxyURL: func() string {
 			next := strings.TrimSpace(req.OpenAICodexTicketHarvestProxyURL)
 			// 打票代理是代理池（逗号分隔），逐个判断是否为掩码回显：
@@ -2328,6 +2349,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		OpenAICodexClientVersionSynced:                         updatedSettings.OpenAICodexClientVersionSynced,
 		OpenAICodexVersionAutoSyncEnabled:                      updatedSettings.OpenAICodexVersionAutoSyncEnabled,
 		OpenAICodexTicketEnabled:                               updatedSettings.OpenAICodexTicketEnabled,
+		OpenAICodexTicketHarvestLoopEnabled:                    updatedSettings.OpenAICodexTicketHarvestLoopEnabled,
+		OpenAICodexTicketRequiredModels:                        updatedSettings.OpenAICodexTicketRequiredModels,
 		OpenAICodexTicketHarvestProxyURL:                       service.MaskOpenAICodexTicketHarvestProxyPool(updatedSettings.OpenAICodexTicketHarvestProxyURL),
 		OpenAICodexTicketHarvestProxyConfigured:                strings.TrimSpace(updatedSettings.OpenAICodexTicketHarvestProxyURL) != "",
 		MinCodexVersion:                                        updatedSettings.MinCodexVersion,

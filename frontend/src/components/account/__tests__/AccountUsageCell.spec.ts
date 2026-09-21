@@ -89,6 +89,44 @@ const cnUsageCellStubs = {
 }
 
 describe('AccountUsageCell', () => {
+  it('shows per-model ticket sources and highlights other egress without guessing old tickets', async () => {
+    getUsage.mockResolvedValue({})
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({
+        platform: 'openai', proxy_id: 100,
+        codex_turn_tickets: [
+          { model: 'gpt-6-astra', ready: true, remaining_seconds: 600, blocked: false, source: 'account_proxy', source_proxy_id: 100 },
+          { model: 'gpt-5.6-sol', ready: true, remaining_seconds: 600, blocked: false, source: 'harvest_pool' },
+          { model: 'legacy', ready: true, remaining_seconds: 600, blocked: false },
+          { model: 'passive', ready: false, remaining_seconds: 0, blocked: false, source: 'business_response' }
+        ]
+      }) },
+      global: { stubs: { OpenAIQuotaResetCell: true, UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    const badges = wrapper.findAll('[data-testid="codex-ticket-source"]')
+    expect(badges.map(badge => badge.attributes('data-source'))).toEqual(['accountProxy', 'harvestPool', 'unknown', 'businessResponse'])
+    expect(badges[0].text()).toContain('#100')
+    expect(badges[0].classes()).not.toContain('bg-amber-100')
+    expect(badges[1].classes()).toContain('bg-amber-100')
+    expect(badges[1].attributes('title')).toContain('codexTicketSource.riskHint')
+    expect(badges[2].attributes('title')).toContain('codexTicketSource.unknownDesc')
+    await wrapper.setProps({ account: {
+      ...wrapper.props('account'),
+      codex_turn_tickets: wrapper.props('account').codex_turn_tickets?.map(ticket => ({ ...ticket, source_proxy_changed: ticket.source === 'account_proxy' }))
+    } })
+    expect(wrapper.get('[data-source="previousProxy"]').text()).toContain('#100')
+    // 编号改变和同编号更新配置两条路径均能突出显示。
+    await wrapper.setProps({ account: {
+      ...wrapper.props('account'),
+      codex_turn_tickets: wrapper.props('account').codex_turn_tickets?.map(ticket => ({ ...ticket, source_proxy_changed: false }))
+    } })
+    await wrapper.setProps({ account: { ...wrapper.props('account'), proxy_id: 102 } })
+    expect(wrapper.get('[data-source="previousProxy"]').text()).toContain('#100')
+    expect(wrapper.get('[data-source="previousProxy"]').classes()).toContain('bg-amber-100')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     getUsage.mockReset()
     Object.defineProperty(window, 'matchMedia', {

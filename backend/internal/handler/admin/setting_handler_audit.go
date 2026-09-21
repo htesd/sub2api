@@ -485,6 +485,12 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.OpenAICodexTicketEnabled != after.OpenAICodexTicketEnabled {
 		changed = append(changed, "openai_codex_ticket_enabled")
 	}
+	if before.OpenAICodexTicketHarvestLoopEnabled != after.OpenAICodexTicketHarvestLoopEnabled {
+		changed = append(changed, "openai_codex_ticket_harvest_loop_enabled")
+	}
+	if before.OpenAICodexTicketRequiredModels != after.OpenAICodexTicketRequiredModels {
+		changed = append(changed, "openai_codex_ticket_required_models")
+	}
 	if before.OpenAICodexTicketHarvestProxyURL != after.OpenAICodexTicketHarvestProxyURL {
 		changed = append(changed, "openai_codex_ticket_harvest_proxy_url")
 	}

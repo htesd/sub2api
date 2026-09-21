@@ -218,6 +218,8 @@ type SystemSettings struct {
 	OpenAICodexClientVersionSynced          string `json:"openai_codex_client_version_synced"`
 	OpenAICodexVersionAutoSyncEnabled       bool   `json:"openai_codex_version_auto_sync_enabled"`
 	OpenAICodexTicketEnabled                bool   `json:"openai_codex_ticket_enabled"`
+	OpenAICodexTicketHarvestLoopEnabled     bool   `json:"openai_codex_ticket_harvest_loop_enabled"`
+	OpenAICodexTicketRequiredModels         string `json:"openai_codex_ticket_required_models"`
 	OpenAICodexTicketHarvestProxyURL        string `json:"openai_codex_ticket_harvest_proxy_url"`
 	OpenAICodexTicketHarvestProxyConfigured bool   `json:"openai_codex_ticket_harvest_proxy_configured"`
 

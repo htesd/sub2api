@@ -537,11 +537,15 @@ export default {
         openaiCodexVersionSyncedValue: '当前同步到：{version}',
         codexHardeningTitle: 'Codex 设置',
         codexTicketEnabled: '292 打票',
+        codexTicketHarvestLoop: '后台主动打票',
+        codexTicketHarvestLoopDesc: '保存后热更新，无需重启。仅为账号级允许主动探测的账号发送合成请求，会消耗上游配额；关闭后已发送的请求可以完成。',
+        codexTicketRequiredModels: '无票不接业务的模型名单',
+        codexTicketRequiredModelsDesc: '填写精确出站模型名，用逗号或换行分隔，保存后热更新。名单内无合格票就拒发，名单外无票仍转发；清空表示全部放行。此策略独立于主动打票开关，关闭主动打票不会解除名单限制。名单模型自动加入打票范围，仍需账号允许主动探测。',
         codexTicketEnabledDesc:
           '关闭后不打票、不注入 x-codex-turn-state，按原链路转发。开启后后台打票，并在业务请求中覆盖该头。',
-        codexTicketHarvestProxy: '292 打票代理',
+        codexTicketHarvestProxy: '打票兜底代理池',
         codexTicketHarvestProxyDesc:
-          '仅在门票功能开启时用于打票，保存后后续探测会使用新代理，无需重启。日常业务仍走账号自己的住宅代理。填写完整代理 URL（http 或 socks5h，含用户名和密码）。代理服务商需自行负责出口 IP 轮换。留空并保存表示不改已保存的值。',
+          '主动打票每轮先用账号自己的代理，失败时最多再从本池选择一个不同代理；无账号代理时直接用本池。未配置本池也可通过账号代理取票。支持多个完整代理 URL（http 或 socks5h），用逗号或换行分隔。保存后热更新；留空表示保留已保存值。账号页会标明票据来源。',
         codexTicketHarvestProxyPlaceholder: "http://user:pass{'@'}proxy.example.com:1080",
         codexTicketHarvestProxyConfigured: '已配置（密码已隐藏）。要更换请整段粘贴新的代理 URL。',
         codexClientRestrictionTitle: 'Codex 客户端限制',
