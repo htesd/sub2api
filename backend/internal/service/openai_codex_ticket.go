@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,6 +89,8 @@ type openAICodexTicket struct {
 	Source               string     `json:"source,omitempty"`
 	SourceProxyID        *int64     `json:"source_proxy_id,omitempty"`
 	SourceProxyUpdatedAt *time.Time `json:"source_proxy_updated_at,omitempty"`
+	RouteEpoch           string     `json:"route_epoch,omitempty"`
+	ModelVerified        bool       `json:"model_verified,omitempty"`
 }
 
 // openAICodexTicketTargetLength 返回该账号的合格 turn-state 长度。
@@ -521,6 +524,14 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 	if account.Extra != nil {
 		extra = parseOpenAICodexTicketFromAny(account.ID, model, account.Extra[openAICodexTicketExtraKey(model)])
 	}
+	if codexMigrationEpoch(account) != "" || codexAutoMigrate(account) {
+		if !codexTicketRouteMatches(account, mem) {
+			mem = nil
+		}
+		if !codexTicketRouteMatches(account, extra) {
+			extra = nil
+		}
+	}
 	if extra.valid(now, targetLen) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
 		s.openaiCodexTickets.Store(key, extra)
 		return extra
@@ -564,16 +575,43 @@ func parseOpenAICodexTicketFromAny(accountID int64, model string, raw any) *open
 	return &ticket
 }
 
-func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, account *Account, ticket *openAICodexTicket) {
+func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, account *Account, ticket *openAICodexTicket) bool {
 	if s == nil || account == nil || ticket == nil || account.ID <= 0 {
-		return
+		return false
 	}
 	model := normalizeOpenAICodexTicketModel(ticket.Model)
 	ticket.Model = model
 	ticket.AccountID = account.ID
+	// 所有生产写票通过出口/代际CAS，旧请求不能在迁移后覆盖新票。
+	if repo, ok := s.accountRepo.(CodexMigrationRepository); ok {
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		ticket.RouteEpoch = codexMigrationEpoch(account)
+		if ticket.SourceProxyID == nil && ticket.Source != "harvest_pool" && account.Proxy != nil {
+			ticket.SourceProxyID = &account.Proxy.ID
+			ticket.SourceProxyUpdatedAt = &account.Proxy.UpdatedAt
+		}
+		stored, err := repo.StoreCodexTicketForRoute(ctx, account, openAICodexTicketExtraKey(model), ticket)
+		if err != nil || !stored {
+			if err != nil {
+				logger.L().Warn("openai_codex_ticket route persist failed", zap.Int64("account_id", account.ID), zap.String("model", model))
+			}
+			// 未参与迁移的账号保留.6内存兜底；必须先确认数据库仍未发生迁移。
+			if err != nil && !codexAutoMigrate(account) && codexMigrationEpoch(account) == "" {
+				latest, e := s.accountRepo.GetByID(ctx, account.ID)
+				if e == nil && latest != nil && !codexAutoMigrate(latest) && codexMigrationEpoch(latest) == "" && codexProxyID(latest) == codexProxyID(account) && openAICodexTicketAccountEnabled(latest) {
+					s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+					return true
+				}
+			}
+			return false
+		}
+		s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
+		return true
+	}
 	s.openaiCodexTickets.Store(openAICodexTicketKey(account.ID, model), ticket)
 	if s.accountRepo == nil {
-		return
+		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -586,6 +624,7 @@ func (s *OpenAIGatewayService) storeOpenAICodexTicket(ctx context.Context, accou
 			zap.Error(err),
 		)
 	}
+	return true
 }
 
 // applyOpenAICodexTicket 在出站请求上覆盖 x-codex-turn-state。
@@ -893,13 +932,17 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 			optedOut++
 			continue
 		}
-		for _, model := range cfg.Models {
+		models := append([]string{}, cfg.Models...)
+		if codexAutoMigrate(&account) && !slices.Contains(models, openAICodexTicketDefaultModel) {
+			models = append(models, openAICodexTicketDefaultModel)
+		}
+		for _, model := range models {
 			model := normalizeOpenAICodexTicketModel(model)
 			if model == "" {
 				continue
 			}
 			// 已有一张有效且未临近过期的票 → 本周期不打，省得白刷。
-			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, openAICodexTicketTargetLength(&account, cfg)) && !t.needsRefresh(now, refreshBefore) {
+			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, openAICodexTicketTargetLength(&account, cfg)) && !t.needsRefresh(now, refreshBefore) && (!codexAutoMigrate(&account) || model != openAICodexTicketDefaultModel || (t.ModelVerified && t.SourceProxyID != nil && codexTicketRouteMatches(&account, t) && !codexMigrationCheckDue(&account, now))) {
 				continue
 			}
 			// 连续失败的 (账号, 模型) 在退避窗口内跳过：拿不到 292 往往是出口 IP
@@ -912,7 +955,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 			// 一次干净出口 IP 的窗口期），给几千个闲置号预打票是纯浪费。冷启动代价是
 			// 某个久未使用的号被调度到时第一发没有票，但它一旦发过请求 last_used_at
 			// 就会更新，下一轮（默认 6 秒内）即进入采集范围。
-			if !openAICodexTicketModelRequired(cfg, model) && !openAICodexTicketAccountRecentlyUsed(&account, cfg, now) {
+			if !(codexAutoMigrate(&account) && model == openAICodexTicketDefaultModel) && !openAICodexTicketModelRequired(cfg, model) && !openAICodexTicketAccountRecentlyUsed(&account, cfg, now) {
 				idle++
 				continue
 			}
@@ -1002,6 +1045,10 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 	if !isOpenAICodexTicketAccount(account) || !openAICodexTicketPlanEligible(account) {
 		return
 	}
+	if codexAutoMigrate(account) && normalizeOpenAICodexTicketModel(model) == openAICodexTicketDefaultModel {
+		s.probeCodexMigration(ctx, account)
+		return
+	}
 	cfg := s.openAICodexTicketConfigContext(ctx)
 	pool := SplitOpenAICodexTicketHarvestProxyPool(s.openAICodexTicketHarvestProxyURLContext(ctx))
 	accountProxy := openAICodexTicketAccountProxyURL(account)
@@ -1041,6 +1088,10 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			}
 			proxyURL, source := accountProxy, "account_proxy"
 			if attempt > 1 || accountProxy == "" {
+				// 自动迁移只由GPT-6决定，其他模型不另取异地池票。
+				if codexAutoMigrate(account) {
+					break
+				}
 				// 使用这一发请求最新的池配置，避免原代理超时期间已被移除的代理仍被使用。
 				fallback := []string{}
 				for _, candidate := range SplitOpenAICodexTicketHarvestProxyPool(latestPolicy.HarvestProxyURL) {
@@ -1103,7 +1154,10 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 					ticket.SourceProxyUpdatedAt = &updatedAt
 				}
 			}
-			s.storeOpenAICodexTicket(ctx, account, ticket)
+			if !s.storeOpenAICodexTicket(ctx, account, ticket) {
+				s.noteOpenAICodexTicketProbeFailure(key, cfg, time.Now())
+				return nil, nil
+			}
 			s.clearOpenAICodexTicketBackoff(key)
 			s.openAICodexTicketProxyRecover(proxyURL)
 			logger.L().Info("openai_codex_ticket harvested",
@@ -1362,7 +1416,9 @@ func (s *OpenAIGatewayService) commitOpenAICodexTicketLocked(ctx context.Context
 		return
 	}
 	// ctx 在函数入口已 WithoutCancel，与请求生命周期解绑。
-	s.storeOpenAICodexTicket(ctx, account, ticket)
+	if !s.storeOpenAICodexTicket(ctx, account, ticket) {
+		return
+	}
 	s.clearOpenAICodexTicketBackoff(openAICodexTicketKey(account.ID, model))
 	logger.L().Info("openai_codex_ticket captured passively",
 		zap.Int64("account_id", account.ID), zap.String("model", model),
@@ -1457,12 +1513,12 @@ func IsOpenAICodexTicketExtraKey(key string) bool {
 func MergeOpenAICodexTicketExtra(extra, current map[string]any) map[string]any {
 	result := maps.Clone(extra)
 	for key := range result {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == CodexMigrationStateKey || key == CodexMigrationEpochKey {
 			delete(result, key)
 		}
 	}
 	for key, value := range current {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == CodexMigrationStateKey || key == CodexMigrationEpochKey {
 			if result == nil {
 				result = make(map[string]any)
 			}

@@ -118,6 +118,7 @@
 
     <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
     <template v-else-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token')">
+      <CodexMigrationStatus :account="account" />
       <!-- 账号退出门票机制时整块降透明度 + title 提示：库存票仍如实展示（ready 不清），
            但不会被注入，所以是叠加态而非替换某个分支。 -->
       <div v-if="codexTurnTickets.length" class="mb-1 space-y-0.5" data-testid="usage-cell-codex-tickets">
@@ -684,6 +685,7 @@ import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import CodexTicketSourceBadge from './CodexTicketSourceBadge.vue'
+import CodexMigrationStatus from './CodexMigrationStatus.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'

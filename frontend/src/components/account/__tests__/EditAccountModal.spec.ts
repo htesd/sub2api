@@ -1452,6 +1452,25 @@ describe('EditAccountModal', () => {
     wrapper.unmount()
   })
 
+  it('自动迁移逐账号保存并可以热关闭，不修改session伪装', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.extra = { codex_ticket_auto_migrate: true, codex_ticket_active_probe: true, codex_fingerprint_mode: 'session' }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get<HTMLInputElement>('[data-testid="edit-codex-auto-migrate-toggle"]')
+    expect(toggle.element.checked).toBe(true)
+    await toggle.setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ codex_ticket_auto_migrate: false, codex_ticket_active_probe: true, codex_fingerprint_mode: 'session' })
+    await toggle.setValue(true)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra?.codex_ticket_auto_migrate).toBe(true)
+    wrapper.unmount()
+  })
+
   it('submits Codex image tool force-inject mode as bridge override', async () => {
     const account = buildAccount()
     account.extra = {

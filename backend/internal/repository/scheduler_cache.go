@@ -863,7 +863,7 @@ func (c *schedulerCache) mgetChunked(ctx context.Context, keys []string) ([]any,
 }
 
 func buildSchedulerMetadataAccount(account service.Account) service.Account {
-	return service.Account{
+	result := service.Account{
 		ID:                      account.ID,
 		Name:                    account.Name,
 		Platform:                account.Platform,
@@ -892,6 +892,13 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		Credentials:             filterSchedulerCredentials(account.Credentials),
 		Extra:                   filterSchedulerExtra(account.Extra),
 	}
+	if account.Extra[service.CodexAutoMigrateKey] == true || account.Extra[service.CodexMigrationEpochKey] != nil {
+		result.ProxyID = account.ProxyID
+		if account.Proxy != nil {
+			result.Proxy = &service.Proxy{ID: account.Proxy.ID, UpdatedAt: account.Proxy.UpdatedAt}
+		}
+	}
+	return result
 }
 
 func filterSchedulerAccountGroups(accountGroups []service.AccountGroup) []service.AccountGroup {
@@ -1035,6 +1042,13 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"grok_billing_snapshot",
 	}
 	filtered := make(map[string]any)
+	if extra[service.CodexAutoMigrateKey] == true || extra[service.CodexMigrationEpochKey] != nil {
+		for key, value := range extra {
+			if service.IsOpenAICodexTicketExtraKey(key) || key == service.CodexAutoMigrateKey || key == service.CodexMigrationEpochKey || key == "codex_ticket_enabled" || key == "codex_ticket_active_probe" {
+				filtered[key] = value
+			}
+		}
+	}
 	for _, key := range keys {
 		if value, ok := extra[key]; ok && value != nil {
 			if key == service.UpstreamBillingProbeExtraKey {

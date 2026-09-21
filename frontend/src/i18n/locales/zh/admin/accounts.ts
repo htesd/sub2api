@@ -776,6 +776,21 @@ export default {
         codexTurnTicketEnabledOn: '开启',
         codexTurnTicketEnabledOff: '关闭',
         codexTurnTicketActiveProbe: '主动打票',
+        codexAutoMigrate: 'GPT-6 自动迁移代理',
+        codexAutoMigrateDesc: '以 GPT-6/Astra 完整响应为准：原代理不可用时，从打票池中已登记的同地区代理取票并携票复验，成功后同步切换账号业务代理和票据。默认关闭，保存后热生效；健康路径每5分钟复验，失败按现有退避重试。沿用现有业务 session 伪装。',
+        codexAutoMigrateRequiresProbe: '需要同时启用本账号门票机制、主动打票及系统后台主动打票开关。',
+        codexMigrationRoute: '代理 {from} → {to}',
+        codexMigrationResults: {
+          current_proxy_ok_no_ticket: '当前代理已返回 GPT-6，但未取得合格新票；保留出口并退避补票',
+          migration_cooldown: '迁移后至少驻留10分钟，暂不再次切换',
+          candidate_ticket_invalid: '候选已返回 GPT-6，但票据规格不合格，未迁移',
+          pending: '等待后台检查', migrated: 'GPT-6 验证通过，已迁移代理', current_proxy_ok: '当前代理 GPT-6 验证通过',
+          probe_failed: '验证未完成，将退避重试', source_proxy_missing: '请先绑定有效的原代理', token_unavailable: '账号凭据暂不可用',
+          upstream_limited: '上游认证、权限或限流阻止验证', egress_unknown: '无法确认原出口地区', proxy_lookup_failed: '读取候选代理失败',
+          no_same_region_candidate: '本轮未找到可验证的同地区候选代理', candidate_not_astra: '候选未完整返回 GPT-6/Astra，未迁移',
+          ticket_replay_failed: '候选携票复验失败，未迁移', egress_changed: '候选出口发生变化，未迁移', candidate_removed: '候选已从打票池移除，未迁移',
+          configuration_changed: '配置已变更或写入失败，放弃本轮迁移'
+        },
         codexTurnTicketActiveProbeDesc:
           '允许后台为本账号发起合成请求来专门打票。每轮优先走账号原代理，失败时最多再试一个不同的打票池代理；未配打票池也可用原代理。默认关闭，会消耗配额，还需开启系统设置中的后台主动打票总开关。无票拒发的模型必须主动获取首票，不能依赖被拦住的业务请求。',
         codexImageTool: 'Codex 图片桥接策略',

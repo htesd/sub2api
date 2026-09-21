@@ -698,6 +698,21 @@ export default {
         codexTurnTicketEnabledOn: 'On',
         codexTurnTicketEnabledOff: 'Off',
         codexTurnTicketActiveProbe: 'Active probing',
+        codexAutoMigrate: 'GPT-6 automatic proxy migration',
+        codexAutoMigrateDesc: 'Requires a completed GPT-6/Astra response. If the current proxy fails, obtain and replay a ticket through a registered, same-region harvest-pool proxy, then switch the account proxy and ticket together. Off by default; changes apply without restart. Healthy routes are checked every 5 minutes; failures use existing backoff. Keeps existing business session masking.',
+        codexAutoMigrateRequiresProbe: 'Requires account tickets, active probing, and the system background probing switch.',
+        codexMigrationRoute: 'Proxy {from} → {to}',
+        codexMigrationResults: {
+          current_proxy_ok_no_ticket: 'Current proxy returned GPT-6 without a usable ticket; keeping proxy and backing off',
+          migration_cooldown: 'Minimum 10-minute migration dwell time; not switching again yet',
+          candidate_ticket_invalid: 'Candidate returned GPT-6 but no valid ticket; no migration',
+          pending: 'Waiting for background check', migrated: 'GPT-6 verified; proxy migrated', current_proxy_ok: 'Current proxy passed GPT-6 verification',
+          probe_failed: 'Verification incomplete; retrying with backoff', source_proxy_missing: 'Bind an active source proxy first', token_unavailable: 'Account credentials unavailable',
+          upstream_limited: 'Upstream authentication, permission, or rate limit prevented verification', egress_unknown: 'Source egress region could not be verified', proxy_lookup_failed: 'Could not load candidate proxies',
+          no_same_region_candidate: 'No verified same-region candidate in this attempt', candidate_not_astra: 'Candidate did not complete GPT-6/Astra; no migration',
+          ticket_replay_failed: 'Candidate ticket replay failed; no migration', egress_changed: 'Candidate egress changed; no migration', candidate_removed: 'Candidate removed from harvest pool; no migration',
+          configuration_changed: 'Configuration changed or persistence failed; migration abandoned'
+        },
         codexTurnTicketActiveProbeDesc:
           'Allow synthetic ticket probes for this account. Each cycle tries the account proxy first, then at most one different pool proxy on failure. The account proxy works without a harvest pool. Off by default and consumes quota; the global background probing switch must also be on. Ticket-required models need active harvesting for their first ticket because business requests are blocked.',
         codexImageTool: 'Codex image bridge policy',

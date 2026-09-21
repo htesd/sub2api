@@ -2333,6 +2333,23 @@
         </div>
       </div>
 
+      <div
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && !isSparkShadow"
+        class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.codexAutoMigrate') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexAutoMigrateDesc') }}</p>
+          </div>
+          <input v-model="codexAutoMigrateEnabled" type="checkbox" role="switch" :aria-label="t('admin.accounts.openai.codexAutoMigrate')" data-testid="edit-codex-auto-migrate-toggle" class="h-5 w-5 shrink-0" />
+        </div>
+        <p v-if="codexAutoMigrateEnabled && (codexTicketEnabledMode === 'off' || !codexTicketActiveProbeEnabled)" class="mt-2 text-xs text-amber-600">
+          {{ t('admin.accounts.openai.codexAutoMigrateRequiresProbe') }}
+        </p>
+        <CodexMigrationStatus :account="account" />
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -3138,6 +3155,7 @@ import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtoc
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
 import CodexTicketSourceBadge from '@/components/account/CodexTicketSourceBadge.vue'
+import CodexMigrationStatus from '@/components/account/CodexMigrationStatus.vue'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
@@ -3624,6 +3642,7 @@ const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexTicketEnabledMode = 'inherit' | 'on' | 'off'
 const codexTicketEnabledMode = ref<CodexTicketEnabledMode>('inherit')
 const codexTicketActiveProbeEnabled = ref(false)
+const codexAutoMigrateEnabled = ref(false)
 
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
@@ -4141,6 +4160,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyAppServerEnabled.value = false
   codexTicketEnabledMode.value = 'inherit'
   codexTicketActiveProbeEnabled.value = false
+  codexAutoMigrateEnabled.value = false
   codexFingerprintMode.value = 'off'
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -4198,6 +4218,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     // 处理，缺键同样是"继承"。否则管理员在 UI 上看到的状态会和实际生效的不一致。
     codexTicketEnabledMode.value = resolveCodexTicketEnabledMode(extra?.codex_ticket_enabled)
     codexTicketActiveProbeEnabled.value = parseCodexTicketBool(extra?.codex_ticket_active_probe) === true
+    codexAutoMigrateEnabled.value = extra?.codex_ticket_auto_migrate === true
 
     if (newAccount.type === 'oauth') {
       const fpMode = extra?.codex_fingerprint_mode as string | undefined
@@ -5745,6 +5766,10 @@ const handleSubmit = async () => {
         newExtra.codex_ticket_active_probe = true
       } else {
         delete newExtra.codex_ticket_active_probe
+      }
+
+      if ((props.account.type === 'oauth' || props.account.type === 'setup-token') && !isSparkShadow.value) {
+        newExtra.codex_ticket_auto_migrate = codexAutoMigrateEnabled.value
       }
 
       // 指纹收敛模式：默认 off（不写入）；device/session/full 是显式 opt-in，
