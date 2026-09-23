@@ -813,6 +813,9 @@ func applyOpenAICodexTicketHarvestIdentity(h http.Header, model string) {
 	}
 }
 
+// needsOpenAICodexAstraVersion 判断打票请求是否要把客户端身份抬到 Astra 所需的最低版本。
+// 有意按整个 GPT-6 系列匹配（Astra / Sol / Luna 及以后的 gpt-6-*）：GPT-6 系列都只对新版
+// Codex 客户端开放，旧版本号去打票会被上游当成不支持的客户端。改成精确匹配前先确认这一点。
 func needsOpenAICodexAstraVersion(model string) bool {
 	m := strings.ToLower(normalizeOpenAICodexTicketModel(model))
 	return strings.Contains(m, "gpt-6") || strings.Contains(m, "astra")

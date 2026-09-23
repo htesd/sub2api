@@ -1,3 +1,22 @@
+## [0.2.5-session-capacity-antistorm.12] - 2026-09-23
+### Features
+- 支持 `gpt-6-sol` / `gpt-6-luna`：模型列表与显示名、客户端写法归一（含 `-high` 等档位后缀和 `-openai-compact`）、Codex 模型清单（推理档位 low–max、默认 medium、Fast 档、图片输入）、`effort=max` 与 `reasoning.mode` 原样透传、Messages 兼容路径的 `prompt_cache_key` 注入。
+- 计费三处价源都补齐（billing 兜底价、pricing 静态价卡、LiteLLM 价卡 JSON），按官方价：Sol 输入 $2 / 缓存读 $0.2 / 缓存写 $2.5 / 输出 $10，Luna 为 $0.1 / $0.01 / $0.125 / $0.5（每百万 token）；超过 272K 输入整条请求输入与缓存 ×2、输出 ×1.5；Fast ×2、Flex ×0.5。
+- 推理档位不是 none 时删掉 `temperature` / `top_p` / `logprobs`，与 GPT-5 系列一致（none 的判断同时认 `reasoning.effort` 和顶层兼容写法 `reasoning_effort`）；Chat Completions 与 Messages 两条兼容路径改用映射后的上游模型做转换。
+- API-Key 账号给 Codex 的模型清单对 Sol/Luna 同样关闭 Responses Lite；前端模型白名单、快捷映射按钮与 OpenCode 配置导出加入两个新模型。
+### Design Rationale
+- 移植自上游未合并的 PR #7509（Wei-Shaw/sub2api），只取 GPT-6 部分。该 PR 同时带 Claude Opus 5.5 支持，但那部分要改 Claude 协议转换，而本分支落后上游 287 个提交、这一块差异大，没有带。
+- 新增系列判断 `isOpenAIGPT6Model`（Astra 或 Sol/Luna），只替换语义上属于"GPT-6 系列通用能力"的调用点；Astra 专用的 1.05M 窗口、`ultra` 档、官方 Codex 0.153 能力默认值、陈旧快照修复仍只认 Astra。改动前后用同一个临时探针对比，`gpt-6-astra` / `gpt-6` / `gpt-5.6-sol` 的归一、档位、窗口、Fast、价格逐字不变；假想的 `gpt-6-nova` 仍不被识别，没有匹配过宽。
+- 没有搬 PR 里"只支持 Chat Completions 的账号 + 工具 + 推理时本地直接返回 400"那段：官方文档写 GPT-6 支持 Chat Completions 且没说有这个限制，本地拦截如果判断错就是误伤，交给上游报错更稳。
+- pricing 静态价卡的 Sol/Luna 分支用归一化后的名字判断，而不是 PR 里的 `HasPrefix("gpt-6-sol")`：后者遇到大小写或别名写法会让 Sol 落到 Luna 的价（便宜 20 倍）。
+- `needsOpenAICodexAstraVersion` 原本就按 `Contains("gpt-6")` 匹配、会命中 Sol/Luna，这次确认是想要的行为（GPT-6 系列都只对新版 Codex 开放）并加注释固化。
+### Notes & Caveats
+- Codex 模型清单里 Sol/Luna 的上下文窗口沿用 5.6 的离线模板（272000 / 最大 872000），不是 API 文档的 1.05M；账号从上游拿到的真实清单会覆盖这里的默认值。
+- Sol/Luna 的 base instructions 仍用默认的最新 Codex 提示词（与 gpt-5.6-sol 相同），不是 Astra 专用那份。
+- 打票（ticket）、降智阻断名单、官方账号 Codex 0.153 能力默认值都仍只针对 Astra，没有扩到 Sol/Luna。
+- 上线前用 codex 做了三视角审查：采纳"顶层 reasoning_effort=none 时误删采样参数"并修复；"Batch 档未打五折"不采纳，本网关没有 Batch 接口，OpenAI 的 service_tier 也没有 batch 取值。
+- 测试：新增 `openai_gpt6_sampling_test.go`（7 个场景）和 `billing_gpt6_sol_luna_test.go`（三个价源 × 271999/272000/272001 × 四种服务档位、渠道显式 0 价、显式 0 缓存写入、别名与大小写不串价）；`go test ./...` 全过；`go test -tags=unit ./...` 有 4 个失败，前端 vitest 全量有 2 个失败，这 6 个在 5ea0fbb59 上就已失败，与本次改动无关。
+
 ## [0.2.5-session-capacity-antistorm.10] - 2026-09-21
 ### Features
 - 新增降智阻断：上游把名单内模型（默认 gpt-6-astra）降级成更快的模型时，在任何响应体到达客户端之前判定，冷却该账号的该模型并换号；全部候选都被降级时给客户端可重试的 429 并说明原因。
