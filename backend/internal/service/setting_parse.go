@@ -914,6 +914,19 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	if raw, ok := settings[SettingKeyOpenAICodexTicketRequiredModels]; ok {
 		result.OpenAICodexTicketRequiredModels = strings.Join(NormalizeCodexTicketRequiredModels(raw), ",")
 	}
+	result.OpenAICodexDowngradeBlockMinutes = openAICodexDowngradeDefaultMinutes
+	result.OpenAICodexDowngradeBlockModels = strings.Join(NormalizeOpenAICodexDowngradeModels(""), ",")
+	if raw, ok := settings[SettingKeyOpenAICodexDowngradeBlockEnabled]; ok {
+		result.OpenAICodexDowngradeBlockEnabled = raw == "true"
+	}
+	if raw, ok := settings[SettingKeyOpenAICodexDowngradeBlockMinutes]; ok {
+		if minutes, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+			result.OpenAICodexDowngradeBlockMinutes = NormalizeOpenAICodexDowngradeMinutes(minutes)
+		}
+	}
+	if raw, ok := settings[SettingKeyOpenAICodexDowngradeBlockModels]; ok {
+		result.OpenAICodexDowngradeBlockModels = strings.Join(NormalizeOpenAICodexDowngradeModels(raw), ",")
+	}
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]

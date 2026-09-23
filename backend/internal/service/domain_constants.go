@@ -713,6 +713,11 @@ const (
 	SettingKeyOpenAICodexTicketEnabled            = "openai_codex_ticket_enabled"
 	SettingKeyOpenAICodexTicketHarvestLoopEnabled = "openai_codex_ticket_harvest_loop_enabled"
 	SettingKeyOpenAICodexTicketRequiredModels     = "openai_codex_ticket_required_models"
+	// 降智阻断：上游把 gpt-6 请求降级成更快的模型（X-Codex-Safety-Buffering-Faster-Model）时，
+	// 冷却该账号的该模型并换号；全部账号都被降级时给客户端可重试错误。默认关闭。
+	SettingKeyOpenAICodexDowngradeBlockEnabled = "openai_codex_downgrade_block_enabled"
+	SettingKeyOpenAICodexDowngradeBlockMinutes = "openai_codex_downgrade_block_minutes"
+	SettingKeyOpenAICodexDowngradeBlockModels  = "openai_codex_downgrade_block_models"
 	// SettingKeyOpenAICodexTicketHarvestProxyURL Codex 292 打票出口（socks5h/http），后台可改、热更新。
 	SettingKeyOpenAICodexTicketHarvestProxyURL = "openai_codex_ticket_harvest_proxy_url"
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。

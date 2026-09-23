@@ -326,6 +326,37 @@ func (s *OpenAIGatewayService) probeCodexMigration(ctx context.Context, account 
 			status.Result = "upstream_limited"
 			return nil, nil
 		}
+		// 本来无票时，上面那次请求只是采票，降级响应不能判定原出口不可用；
+		// 先拿新票在原代理复验，避免把本可留下的账号迁走。
+		if sent == "" {
+			t := newCodexMigrationTicket(account, account.Proxy, state, cfg.TTLSeconds)
+			if t.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {
+				if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
+					return nil, nil
+				}
+				_, replayStatus, replayModel, replayOK := s.fireCodexMigrationProbe(ctx, account, token, account.Proxy.URL(), session, state)
+				if replayStatus == 401 || replayStatus == 403 || replayStatus == 429 {
+					status.Result = "upstream_limited"
+					return nil, nil
+				}
+				status.ResponseModel = replayModel
+				if replayOK {
+					if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
+						return nil, nil
+					}
+					stored, storeErr := repo.StoreCodexTicketForRoute(ctx, account, openAICodexTicketExtraKey(t.Model), t)
+					if storeErr != nil || !stored {
+						status.Result = "configuration_changed"
+						return nil, nil
+					}
+					s.openaiCodexTickets.Store(key, t)
+					status.Result = "current_proxy_ok"
+					_ = repo.RecordCodexMigrationState(ctx, account, status)
+					s.clearOpenAICodexTicketBackoff(key)
+					return nil, nil
+				}
+			}
+		}
 		if status.MigratedAt != nil && time.Since(*status.MigratedAt) < 10*time.Minute {
 			status.Result = "migration_cooldown"
 			return nil, nil
@@ -333,11 +364,7 @@ func (s *OpenAIGatewayService) probeCodexMigration(ctx context.Context, account 
 		if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
 			return nil, nil
 		}
-		origin, err := s.codexMigrationEgress(ctx, account, account.Proxy.URL())
-		if err != nil {
-			status.Result = "egress_unknown"
-			return nil, nil
-		}
+		// 原出口画像不再参与判定（不比国家、不比 IP），省掉这一发 trace。
 		proxies, err := repo.ListCodexMigrationProxies(ctx)
 		if err != nil {
 			status.Result = "proxy_lookup_failed"
@@ -380,45 +407,39 @@ func (s *OpenAIGatewayService) probeCodexMigration(ctx context.Context, account 
 			if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
 				return nil, nil
 			}
-			egress, err := s.codexMigrationEgress(ctx, account, p.URL())
-			if err != nil || egress.country != origin.country || egress.hash == origin.hash {
-				continue
-			}
+			// 不再要求候选与原出口同国家：能拿到真模型优先于出口地理一致性。
+			// trace 只用于记录出口画像，失败或跨国都不阻断切换。
 			status.ToProxyID = p.ID
-			status.Country = egress.country
-			status.IPHash = egress.hash
+			if egress, err := s.codexMigrationEgress(ctx, account, p.URL()); err == nil {
+				status.Country = egress.country
+				status.IPHash = egress.hash
+			}
 			if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
 				return nil, nil
 			}
-			state, code, observed, matched := s.fireCodexMigrationProbe(ctx, account, token, p.URL(), session, "")
+			// 采票请求本身常被降级（无票时上游多返回 luna），它只负责产出 turn-state；
+			// 能力证明一律留给下一步的携票复验，不能用采票响应的模型名提前否决候选。
+			state, code, observed, _ := s.fireCodexMigrationProbe(ctx, account, token, p.URL(), session, "")
 			status.ResponseModel = observed
-			status.Result = "candidate_not_astra"
+			status.Result = "candidate_ticket_invalid"
 			if code == 401 || code == 403 || code == 429 {
 				status.Result = "upstream_limited"
 				return nil, nil
 			}
 			t := newCodexMigrationTicket(account, p, state, cfg.TTLSeconds)
-			if !matched || !t.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {
-				if matched {
-					status.Result = "candidate_ticket_invalid"
-				}
+			if !t.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {
 				return nil, nil
 			}
-			// 使用新票在同代理复验，防止只读头/无票成功就把业务迁过去。
+			// 票据与出口必须同源：候选出口采到合格票即提交迁移，不再要求携票复验拿到
+			// 完整 astra。原因是 astra 降级由服务端按账号决定，任何出口都救不回已降级的
+			// 账号（当天 20 例请求形状 × 2 出口 × 有票/无票全部返回 luna），把 astra 当
+			// 切换前置条件会让所有迁移永远停在 candidate_not_astra，票被丢弃、账号在拒发
+			// 名单下彻底不可用。降级识别改由请求期的降智阻断（.10）承担：真降级时冷却账号
+			// 并换号，因此这里切过去最差是中性，不会把用户留在错误模型上。
 			if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
 				return nil, nil
 			}
-			_, _, observed, matched = s.fireCodexMigrationProbe(ctx, account, token, p.URL(), session, state)
-			if !matched {
-				status.Result = "ticket_replay_failed"
-				status.ResponseModel = observed
-				return nil, nil
-			}
-			after, err := s.codexMigrationEgress(ctx, account, p.URL())
-			if err != nil || after != egress {
-				status.Result = "egress_changed"
-				return nil, nil
-			}
+
 			if _, allowed = s.codexMigrationAuthorized(ctx, account); !allowed {
 				return nil, nil
 			}
@@ -462,4 +483,64 @@ func newCodexMigrationTicket(a *Account, p *Proxy, state string, ttl int) *openA
 	now := time.Now()
 	issued := resolveOpenAICodexTicketIssuedAt(state, now, time.Duration(ttl)*time.Second, a.ID, openAICodexTicketDefaultModel)
 	return &openAICodexTicket{AccountID: a.ID, Model: openAICodexTicketDefaultModel, State: state, Length: len(state), CapturedAt: now, IssuedAt: issued, ExpiresAt: issued.Add(time.Duration(ttl) * time.Second), Source: "account_proxy", SourceProxyID: &p.ID, SourceProxyUpdatedAt: &p.UpdatedAt, RouteEpoch: codexMigrationEpoch(a), ModelVerified: true}
+}
+
+// commitOpenAICodexPoolTicketMigration 把「从打票池代理采到的票」与账号出口绑定到一起：
+// 在同一事务内切换账号业务代理到该池代理、落票、换路由代际并清掉旧出口票。
+// 这是票据同源不变量的落点——票在哪个出口签发，账号就从哪个出口发请求。
+// 返回 false 表示无法切换（未开迁移开关、池代理不在代理管理内/已停用/已过期、提交被 CAS 拒绝），
+// 此时调用方必须丢弃这张票，绝不允许跨出口注入。
+func (s *OpenAIGatewayService) commitOpenAICodexPoolTicketMigration(ctx context.Context, account *Account, proxyURL string, ticket *openAICodexTicket, models []string) bool {
+	repo, ok := s.accountRepo.(CodexMigrationRepository)
+	if !ok || account == nil || ticket == nil {
+		return false
+	}
+	// 迁移开关保护的是「你手工配好的出口」：已绑代理的账号必须开关打开才允许被改出口；
+	// 未绑代理的账号没有出口偏好可保护，为了让它们能持有可用票，一律允许跟票切过去。
+	bound := account.ProxyID != nil && *account.ProxyID > 0
+	if bound {
+		if !codexAutoMigrate(account) {
+			return false
+		}
+		if _, allowed := s.codexMigrationAuthorized(ctx, account); !allowed {
+			return false
+		}
+	}
+	proxies, err := repo.ListCodexMigrationProxies(ctx)
+	if err != nil {
+		return false
+	}
+	var target *Proxy
+	now := time.Now()
+	for i := range proxies {
+		p := &proxies[i]
+		if p.IsActive() && !p.IsExpired(now) && sameOpenAICodexTicketProxy(p.URL(), proxyURL) {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		logger.L().Info("openai_codex_ticket pool ticket dropped", zap.Int64("account_id", account.ID),
+			zap.String("model", ticket.Model), zap.String("reason", "proxy_not_manageable"),
+			zap.String("proxy", MaskProxyURL(proxyURL)))
+		return false
+	}
+	ticket.SourceProxyID = &target.ID
+	ticket.SourceProxyUpdatedAt = &target.UpdatedAt
+	ticket.RouteEpoch = uuid.NewString()
+	status := CodexMigrationState{
+		Result: "migrated", CheckedAt: now, MigratedAt: &now,
+		FromProxyID: codexProxyID(account), ToProxyID: target.ID,
+	}
+	committed, err := repo.CommitCodexMigration(ctx, account, target, ticket, status)
+	if err != nil || !committed {
+		return false
+	}
+	for _, m := range models {
+		s.openaiCodexTickets.Delete(openAICodexTicketKey(account.ID, m))
+	}
+	logger.L().Info("openai_codex_ticket proxy migrated", zap.Int64("account_id", account.ID),
+		zap.Int64("from_proxy_id", status.FromProxyID), zap.Int64("to_proxy_id", target.ID),
+		zap.String("model", ticket.Model), zap.String("trigger", "pool_harvest"))
+	return true
 }

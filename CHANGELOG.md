@@ -1,3 +1,33 @@
+## [0.2.5-session-capacity-antistorm.10] - 2026-09-21
+### Features
+- 新增降智阻断：上游把名单内模型（默认 gpt-6-astra）降级成更快的模型时，在任何响应体到达客户端之前判定，冷却该账号的该模型并换号；全部候选都被降级时给客户端可重试的 429 并说明原因。
+- 三个可热更新设置项：`openai_codex_downgrade_block_enabled`（默认关闭）、`openai_codex_downgrade_block_minutes`（默认 30，1–1440）、`openai_codex_downgrade_block_models`（默认 gpt-6-astra），面板可改，保存即生效。
+- 覆盖原生流式、非流式与 passthrough 流式三条路径；passthrough 的判定放在模型名改写之前，用上游原始模型名判断。
+### Design Rationale
+- 判据只能是「这一轮上游实际回了哪个模型」。当天实测：账号一旦进入 safety buffering，改请求形状（tools / reasoning effort / service_tier / originator，共 20 例）、换出口、注入合格票都无法恢复；而未进入该状态的账号用最简请求也能拿到目标模型。因此处置是冷却账号，不是重试或改写请求。
+- 降级响应是 HTTP 200 + 完整 SSE + `response.completed`，既有失败判据全都发现不了它，客户端会静默收到降级结果——这正是必须在网关侧拦的原因。
+- 判定点选在首输出暂存阶段（OpenAI 账号默认开启）：此时 `response.created` 尚未提交给客户端，可以安全换号，客户端全程无感；一旦语义字节已出站就不再换号。
+- 冷却同时写进程内 transient 与持久化 `extra.model_rate_limits[模型]`，后者让重启与多实例都排除该账号，且只影响该模型。
+- 换号错误必须是 error 而不是成功返回，否则调度器会在成功路径上把刚写的冷却清掉。
+### Notes & Caveats
+- 默认关闭；开启后每次命中都会消耗一次上游请求（降级响应已经产生），换号次数受既有 `MaxAccountSwitches`（默认 3）限制。
+- 上游只在降级轮返回 `X-Codex-Safety-Buffering-Faster-Model`，该头只记日志，不单独作为判据。
+- WS 路径（openai_ws_forwarder_v2 / ingress / http_bridge）与 `/v1/messages` 桥尚未接入同一判定。
+- 单次降级不会立即触发进程内 transient 熔断（它按连续失败计数），生效冷却来自持久化限流。
+
+## [0.2.5-session-capacity-antistorm.9] - 2026-09-21
+### Features
+- 修正自动迁移的判定顺序：无票时的首个请求只当作采票，不再用它的响应模型否决出口；能力证明改由「携刚采到的票在同一出口复验」提供。
+- 原代理缺票时也先在原代理采票并复验，复验通过即留在原代理并落票（`current_proxy_ok`），只有原出口携票仍拿不到 Astra 才进入候选迁移。
+### Design Rationale
+- 线上实测：开启迁移的 4 个账号全部停在 `candidate_not_astra`。采票请求本身通常被上游降级（返回 luna），旧逻辑在采票阶段就要求 Astra，等于要求「先有票才可能拿票」，候选永远无法通过，迁移不可能发生。
+- 判据仍是完整 SSE 的实际模型，只是把它挪到唯一有意义的位置——携票复验；因此「不以票长度或 HTTP 200 当能力证明」的约束没有放松。
+- 优先原代理的语义因此才真正成立：先给原出口一次带票机会，避免把只是缺票的账号迁走造成无谓的出口抖动。
+### Notes & Caveats
+- 每轮上游请求上限从 3 次升到 4 次（原代理采票+复验、候选采票+复验）；地区判据挡下候选时只花前两次。
+- `candidate_not_astra` 现在表示「候选携票复验拿到的仍是非 Astra 完整响应」，`candidate_ticket_invalid` 表示候选采票阶段没拿到合格票，前端结果码与文案不变。
+- 上游若整体停止发放 Astra（例如手动停用该模型或账号无权限），所有出口都会判为不可用，此时不迁移是预期行为，不是故障。
+
 ## [0.2.5-session-capacity-antistorm.8] - 2026-09-21
 ### Features
 - 基于已发布的 antistorm.6 增加账号级 GPT-6 自动迁移代理开关，默认关闭，保存后热更新；账号列表及编辑面板显示最近验证/迁移结果。

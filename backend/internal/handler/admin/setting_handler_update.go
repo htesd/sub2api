@@ -260,6 +260,9 @@ type UpdateSettingsRequest struct {
 	OpenAICodexTicketEnabled               *bool   `json:"openai_codex_ticket_enabled"`
 	OpenAICodexTicketHarvestLoopEnabled    *bool   `json:"openai_codex_ticket_harvest_loop_enabled"`
 	OpenAICodexTicketRequiredModels        *string `json:"openai_codex_ticket_required_models"`
+	OpenAICodexDowngradeBlockEnabled       *bool   `json:"openai_codex_downgrade_block_enabled"`
+	OpenAICodexDowngradeBlockMinutes       *int    `json:"openai_codex_downgrade_block_minutes"`
+	OpenAICodexDowngradeBlockModels        *string `json:"openai_codex_downgrade_block_models"`
 	OpenAICodexTicketHarvestProxyURL       string  `json:"openai_codex_ticket_harvest_proxy_url"`
 
 	// codex_cli_only 加固（global-only）
@@ -503,6 +506,15 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	// 新策略需要保留“尚未配置”与“显式清空”的区别。
 	if req.OpenAICodexTicketRequiredModels == nil {
 		omitted[service.SettingKeyOpenAICodexTicketRequiredModels] = struct{}{}
+	}
+	if req.OpenAICodexDowngradeBlockEnabled == nil {
+		omitted[service.SettingKeyOpenAICodexDowngradeBlockEnabled] = struct{}{}
+	}
+	if req.OpenAICodexDowngradeBlockMinutes == nil {
+		omitted[service.SettingKeyOpenAICodexDowngradeBlockMinutes] = struct{}{}
+	}
+	if req.OpenAICodexDowngradeBlockModels == nil {
+		omitted[service.SettingKeyOpenAICodexDowngradeBlockModels] = struct{}{}
 	}
 	if req.OpenAICodexTicketHarvestLoopEnabled == nil {
 		omitted[service.SettingKeyOpenAICodexTicketHarvestLoopEnabled] = struct{}{}
@@ -1791,6 +1803,24 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAICodexTicketHarvestLoopEnabled
 		}(),
+		OpenAICodexDowngradeBlockEnabled: func() bool {
+			if req.OpenAICodexDowngradeBlockEnabled != nil {
+				return *req.OpenAICodexDowngradeBlockEnabled
+			}
+			return previousSettings.OpenAICodexDowngradeBlockEnabled
+		}(),
+		OpenAICodexDowngradeBlockMinutes: func() int {
+			if req.OpenAICodexDowngradeBlockMinutes != nil {
+				return *req.OpenAICodexDowngradeBlockMinutes
+			}
+			return previousSettings.OpenAICodexDowngradeBlockMinutes
+		}(),
+		OpenAICodexDowngradeBlockModels: func() string {
+			if req.OpenAICodexDowngradeBlockModels != nil {
+				return *req.OpenAICodexDowngradeBlockModels
+			}
+			return previousSettings.OpenAICodexDowngradeBlockModels
+		}(),
 		OpenAICodexTicketRequiredModels: func() string {
 			if req.OpenAICodexTicketRequiredModels != nil {
 				return *req.OpenAICodexTicketRequiredModels
@@ -2351,6 +2381,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		OpenAICodexTicketEnabled:                               updatedSettings.OpenAICodexTicketEnabled,
 		OpenAICodexTicketHarvestLoopEnabled:                    updatedSettings.OpenAICodexTicketHarvestLoopEnabled,
 		OpenAICodexTicketRequiredModels:                        updatedSettings.OpenAICodexTicketRequiredModels,
+		OpenAICodexDowngradeBlockEnabled:                       updatedSettings.OpenAICodexDowngradeBlockEnabled,
+		OpenAICodexDowngradeBlockMinutes:                       updatedSettings.OpenAICodexDowngradeBlockMinutes,
+		OpenAICodexDowngradeBlockModels:                        updatedSettings.OpenAICodexDowngradeBlockModels,
 		OpenAICodexTicketHarvestProxyURL:                       service.MaskOpenAICodexTicketHarvestProxyPool(updatedSettings.OpenAICodexTicketHarvestProxyURL),
 		OpenAICodexTicketHarvestProxyConfigured:                strings.TrimSpace(updatedSettings.OpenAICodexTicketHarvestProxyURL) != "",
 		MinCodexVersion:                                        updatedSettings.MinCodexVersion,

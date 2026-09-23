@@ -220,6 +220,9 @@ type SystemSettings struct {
 	OpenAICodexTicketEnabled                bool   `json:"openai_codex_ticket_enabled"`
 	OpenAICodexTicketHarvestLoopEnabled     bool   `json:"openai_codex_ticket_harvest_loop_enabled"`
 	OpenAICodexTicketRequiredModels         string `json:"openai_codex_ticket_required_models"`
+	OpenAICodexDowngradeBlockEnabled        bool   `json:"openai_codex_downgrade_block_enabled"`
+	OpenAICodexDowngradeBlockMinutes        int    `json:"openai_codex_downgrade_block_minutes"`
+	OpenAICodexDowngradeBlockModels         string `json:"openai_codex_downgrade_block_models"`
 	OpenAICodexTicketHarvestProxyURL        string `json:"openai_codex_ticket_harvest_proxy_url"`
 	OpenAICodexTicketHarvestProxyConfigured bool   `json:"openai_codex_ticket_harvest_proxy_configured"`
 

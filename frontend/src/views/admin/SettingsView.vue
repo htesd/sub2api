@@ -4523,6 +4523,23 @@
                   </div>
                   <Toggle id="codex-ticket-harvest-loop" v-model="form.openai_codex_ticket_harvest_loop_enabled" />
                 </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlock") }}</h3>
+                    <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockDesc") }}</p>
+                  </div>
+                  <Toggle id="codex-downgrade-block" v-model="form.openai_codex_downgrade_block_enabled" />
+                </div>
+                <div>
+                  <label for="codex-downgrade-block-minutes" class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockMinutes") }}</label>
+                  <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockMinutesDesc") }}</p>
+                  <input id="codex-downgrade-block-minutes" v-model.number="form.openai_codex_downgrade_block_minutes" type="number" min="1" max="1440" class="input mt-3 w-40" />
+                </div>
+                <div>
+                  <label for="codex-downgrade-block-models" class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockModels") }}</label>
+                  <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockModelsDesc") }}</p>
+                  <textarea id="codex-downgrade-block-models" v-model="form.openai_codex_downgrade_block_models" class="input mt-3 w-full font-mono text-sm" rows="2" placeholder="gpt-6-astra" />
+                </div>
                 <div>
                   <label for="codex-ticket-required-models" class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexTicketRequiredModels") }}</label>
                   <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexTicketRequiredModelsDesc") }}</p>
@@ -9892,6 +9909,9 @@ const form = reactive<SettingsForm>({
   openai_codex_ticket_enabled: false,
   openai_codex_ticket_harvest_loop_enabled: false,
   openai_codex_ticket_required_models: "",
+  openai_codex_downgrade_block_enabled: false,
+  openai_codex_downgrade_block_minutes: 30,
+  openai_codex_downgrade_block_models: "gpt-6-astra",
   openai_codex_ticket_harvest_proxy_url: "",
   openai_codex_ticket_harvest_proxy_configured: false,
   // codex_cli_only 加固
@@ -11503,6 +11523,9 @@ async function saveSettings() {
       openai_codex_ticket_enabled: form.openai_codex_ticket_enabled,
       openai_codex_ticket_harvest_loop_enabled: form.openai_codex_ticket_harvest_loop_enabled,
       openai_codex_ticket_required_models: form.openai_codex_ticket_required_models,
+      openai_codex_downgrade_block_enabled: form.openai_codex_downgrade_block_enabled,
+      openai_codex_downgrade_block_minutes: Number(form.openai_codex_downgrade_block_minutes) || 30,
+      openai_codex_downgrade_block_models: form.openai_codex_downgrade_block_models,
       openai_codex_ticket_harvest_proxy_url:
         form.openai_codex_ticket_harvest_proxy_url?.trim() || "",
       min_codex_version: form.min_codex_version?.trim() || "",

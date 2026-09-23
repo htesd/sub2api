@@ -3404,6 +3404,21 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage(), streamStarted)
 		return
 	}
+	// 降智阻断：候选账号全部被上游降级时，给客户端可重试的 429 与明确原因，
+	// 客户端重试会落到冷却之外的账号。
+	if service.IsOpenAICodexDowngradeErrorBody(responseBody) {
+		message := strings.TrimSpace(failoverErr.ClientMessage)
+		if message == "" {
+			message = service.OpenAICodexDowngradeClientMessage()
+		}
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusTooManyRequests
+		}
+		service.SetOpsUpstreamError(c, statusCode, message, "")
+		h.handleStreamingAwareError(c, status, "rate_limit_error", message, streamStarted)
+		return
+	}
 
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {

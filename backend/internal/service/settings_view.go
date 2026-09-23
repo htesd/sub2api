@@ -253,6 +253,9 @@ type SystemSettings struct {
 	OpenAICodexTicketEnabled               bool   // Codex 292 打票总开关；关闭则不打票不注入
 	OpenAICodexTicketHarvestLoopEnabled    bool
 	OpenAICodexTicketRequiredModels        string // 逗号分隔的精确出站模型名；空字符串清空名单。
+	OpenAICodexDowngradeBlockEnabled       bool   // 上游降智（返回更快模型）时冷却该账号该模型并换号
+	OpenAICodexDowngradeBlockMinutes       int    // 降智冷却分钟数；<=0 使用默认 30
+	OpenAICodexDowngradeBlockModels        string // 逗号分隔的出站模型名；空=默认 gpt-6-astra
 	OpenAICodexTicketPolicyLoaded          bool   // 已从数据库读取的设置快照。
 	OpenAICodexTicketPolicyModelsPresent   bool
 	OpenAICodexTicketPolicyLoopPresent     bool

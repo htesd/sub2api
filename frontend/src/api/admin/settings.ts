@@ -642,6 +642,9 @@ export interface SystemSettings {
   openai_codex_ticket_enabled: boolean;
   openai_codex_ticket_harvest_loop_enabled: boolean;
   openai_codex_ticket_required_models: string;
+  openai_codex_downgrade_block_enabled: boolean;
+  openai_codex_downgrade_block_minutes: number;
+  openai_codex_downgrade_block_models: string;
   openai_codex_ticket_harvest_proxy_url: string;
   openai_codex_ticket_harvest_proxy_configured: boolean;
   // codex_cli_only 加固
@@ -966,6 +969,9 @@ export interface UpdateSettingsRequest {
   openai_codex_ticket_enabled?: boolean;
   openai_codex_ticket_harvest_loop_enabled?: boolean;
   openai_codex_ticket_required_models?: string;
+  openai_codex_downgrade_block_enabled?: boolean;
+  openai_codex_downgrade_block_minutes?: number;
+  openai_codex_downgrade_block_models?: string;
   openai_codex_ticket_harvest_proxy_url?: string;
   // codex_cli_only 加固
   min_codex_version?: string;

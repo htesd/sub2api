@@ -53,6 +53,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
+	// 降智阻断策略在进入流处理前取一次，避免每个 SSE 帧都读设置缓存。
+	downgradePolicy := s.openAICodexDowngradePolicy(ctx)
+	downgradeChecked := false
 	firstOutputTimeout := time.Duration(0)
 	if account != nil && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
@@ -497,6 +500,18 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			// 降智判定：上游把名单内模型换成更快的模型时，此刻 response.created 仍在
+			// 首输出暂存里，客户端零字节，可以安全换号。只判一次，判过就不再重复写冷却。
+			if !downgradeChecked && downgradePolicy.Enabled && !clientOutputStarted && streamEarlyErr == nil {
+				if observed := openAICodexDowngradeObservedModel(dataBytes); observed != "" {
+					downgradeChecked = true
+					if failover := s.openAICodexDowngradeStreamCheck(ctx, c, account, mappedModel, dataBytes,
+						upstreamRequestID, resp.Header, downgradePolicy); failover != nil {
+						streamEarlyErr = failover
+						return
+					}
+				}
+			}
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -1591,6 +1606,13 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+	}
+	// 非流式路径天然全量缓冲，客户端此刻还没拿到任何字节，判定即可直接换号。
+	if policy := s.openAICodexDowngradePolicy(ctx); policy.Enabled && resp.StatusCode == http.StatusOK {
+		if failover := s.openAICodexDowngradeNonStreamCheck(ctx, c, account, mappedModel, body,
+			strings.TrimSpace(resp.Header.Get("x-request-id")), resp.Header, policy); failover != nil {
+			return nil, failover
+		}
 	}
 
 	// Detect SSE responses for ALL account types via Content-Type header.

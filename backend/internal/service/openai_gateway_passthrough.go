@@ -1843,6 +1843,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
+	downgradePolicy := s.openAICodexDowngradePolicy(ctx)
+	downgradeChecked := false
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 
 	// SSE headers
@@ -2001,6 +2003,16 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, rawEventType)
+			// 降智判定要用上游原始模型名，必须在 needModelReplace 改写之前做。
+			if !downgradeChecked && downgradePolicy.Enabled && !clientOutputStarted {
+				if observed := openAICodexDowngradeObservedModel(dataBytes); observed != "" {
+					downgradeChecked = true
+					if failover := s.openAICodexDowngradeStreamCheck(ctx, c, account, mappedModel, dataBytes,
+						upstreamRequestID, resp.Header, downgradePolicy); failover != nil {
+						return resultWithUsage(), failover
+					}
+				}
+			}
 			if needModelReplace && strings.Contains(data, mappedModel) {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 				if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {

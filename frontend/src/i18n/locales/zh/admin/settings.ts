@@ -539,6 +539,12 @@ export default {
         codexTicketEnabled: '292 打票',
         codexTicketHarvestLoop: '后台主动打票',
         codexTicketHarvestLoopDesc: '保存后热更新，无需重启。仅为账号级允许主动探测的账号发送合成请求，会消耗上游配额；关闭后已发送的请求可以完成。',
+        codexDowngradeBlock: '降智阻断（上游换模型即换号）',
+        codexDowngradeBlockDesc: '保存后热更新。上游把名单内模型降级成更快的模型（safety buffering）时，在转发给客户端之前判定并换号；该账号的该模型进入冷却，其他模型不受影响。全部候选都被降级时给客户端可重试的 429 并说明原因。',
+        codexDowngradeBlockMinutes: '降智冷却时长（分钟）',
+        codexDowngradeBlockMinutesDesc: '命中降智后该账号该模型的冷却时长，1–1440 分钟，默认 30。冷却写入数据库，重启与多实例同样生效。',
+        codexDowngradeBlockModels: '降智阻断的模型名单',
+        codexDowngradeBlockModelsDesc: '填写精确出站模型名，逗号或换行分隔；留空等于仅 gpt-6-astra。只有名单内的模型会做降级判定，避免误伤本来就会路由到其他模型的请求。',
         codexTicketRequiredModels: '无票不接业务的模型名单',
         codexTicketRequiredModelsDesc: '填写精确出站模型名，用逗号或换行分隔，保存后热更新。名单内无合格票就拒发，名单外无票仍转发；清空表示全部放行。此策略独立于主动打票开关，关闭主动打票不会解除名单限制。名单模型自动加入打票范围，仍需账号允许主动探测。',
         codexTicketEnabledDesc:

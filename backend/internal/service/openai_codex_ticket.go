@@ -1088,10 +1088,6 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			}
 			proxyURL, source := accountProxy, "account_proxy"
 			if attempt > 1 || accountProxy == "" {
-				// 自动迁移只由GPT-6决定，其他模型不另取异地池票。
-				if codexAutoMigrate(account) {
-					break
-				}
 				// 使用这一发请求最新的池配置，避免原代理超时期间已被移除的代理仍被使用。
 				fallback := []string{}
 				for _, candidate := range SplitOpenAICodexTicketHarvestProxyPool(latestPolicy.HarvestProxyURL) {
@@ -1153,6 +1149,27 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 					updatedAt := account.Proxy.UpdatedAt
 					ticket.SourceProxyUpdatedAt = &updatedAt
 				}
+			}
+			// 池票必须连带出口一起落地：切换成功才算这张票可用，切不了就丢掉，
+			// 绝不把异地票注入到账号当前出口（跨出口注入会被上游判无效）。
+			_, migratable := s.accountRepo.(CodexMigrationRepository)
+			if source == "harvest_pool" && migratable {
+				if !s.commitOpenAICodexPoolTicketMigration(ctx, account, proxyURL, ticket, cfg.Models) {
+					logger.L().Info("openai_codex_ticket pool ticket dropped",
+						zap.Int64("account_id", account.ID), zap.String("model", model),
+						zap.String("reason", "egress_switch_unavailable"),
+						zap.String("proxy", MaskProxyURL(proxyURL)))
+					s.noteOpenAICodexTicketProbeFailure(key, cfg, time.Now())
+					return nil, nil
+				}
+				s.clearOpenAICodexTicketBackoff(key)
+				s.openAICodexTicketProxyRecover(proxyURL)
+				logger.L().Info("openai_codex_ticket harvested",
+					zap.Int64("account_id", account.ID), zap.String("model", model),
+					zap.Int("length", ticket.Length), zap.String("mode", "continuous"),
+					zap.String("source", source), zap.Bool("egress_switched", true),
+					zap.Time("issued_at", issuedAt), zap.String("proxy", MaskProxyURL(proxyURL)))
+				return nil, nil
 			}
 			if !s.storeOpenAICodexTicket(ctx, account, ticket) {
 				s.noteOpenAICodexTicketProbeFailure(key, cfg, time.Now())

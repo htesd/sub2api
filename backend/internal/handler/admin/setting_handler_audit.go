@@ -491,6 +491,15 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.OpenAICodexTicketRequiredModels != after.OpenAICodexTicketRequiredModels {
 		changed = append(changed, "openai_codex_ticket_required_models")
 	}
+	if before.OpenAICodexDowngradeBlockEnabled != after.OpenAICodexDowngradeBlockEnabled {
+		changed = append(changed, "openai_codex_downgrade_block_enabled")
+	}
+	if before.OpenAICodexDowngradeBlockMinutes != after.OpenAICodexDowngradeBlockMinutes {
+		changed = append(changed, "openai_codex_downgrade_block_minutes")
+	}
+	if before.OpenAICodexDowngradeBlockModels != after.OpenAICodexDowngradeBlockModels {
+		changed = append(changed, "openai_codex_downgrade_block_models")
+	}
 	if before.OpenAICodexTicketHarvestProxyURL != after.OpenAICodexTicketHarvestProxyURL {
 		changed = append(changed, "openai_codex_ticket_harvest_proxy_url")
 	}

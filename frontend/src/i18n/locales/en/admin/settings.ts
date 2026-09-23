@@ -546,6 +546,12 @@ export default {
         codexTicketEnabled: "292 ticket harvest",
         codexTicketHarvestLoop: "Background active probing",
         codexTicketHarvestLoopDesc: "Hot-updated on save, without a restart. Sends synthetic requests only for accounts that opt in, consuming upstream quota. Requests already sent may finish after disabling.",
+        codexDowngradeBlock: 'Block model downgrades (switch account)',
+        codexDowngradeBlockDesc: 'Hot-reloaded on save. When upstream downgrades a listed model to a faster one (safety buffering), detect it before forwarding to the client and switch accounts; that account is cooled down for that model only. When every candidate is downgraded, the client gets a retryable 429 with the reason.',
+        codexDowngradeBlockMinutes: 'Downgrade cooldown (minutes)',
+        codexDowngradeBlockMinutesDesc: 'Cooldown applied to the account/model pair after a downgrade, 1-1440 minutes, default 30. Persisted, so it survives restarts and applies across instances.',
+        codexDowngradeBlockModels: 'Models covered by downgrade blocking',
+        codexDowngradeBlockModelsDesc: 'Exact upstream model names, comma or newline separated; empty means gpt-6-astra only. Only listed models are checked, so requests that legitimately route elsewhere are untouched.',
         codexTicketRequiredModels: "Models requiring a ticket",
         codexTicketRequiredModelsDesc: "Exact outbound model names, separated by commas or newlines. Hot-updated on save. Listed models require a valid ticket; other models can forward without one. Empty means allow all. Disabling active probing does not lift this restriction. Listed models are automatically included in harvesting; account-level opt-in is still required.",
         codexTicketEnabledDesc:
