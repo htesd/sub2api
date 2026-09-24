@@ -1,3 +1,24 @@
+## [0.2.8-session-capacity-antistorm.13] - 2026-09-24
+### Features
+- 整体合并上游 v0.2.8（Wei-Shaw/sub2api，2026-09-23，本分支原基线为 09-15 的 0.2.5，落后 307 个提交）。对本站（只跑 OpenAI OAuth 号）有用的主要是：
+  - 流式收到结束事件即结束，不再等上游断开连接；恢复 OpenAI HTTP/2 保活容错；关闭响应体前先取消响应尝试
+  - 非高级调度下，续接会话的请求（带 previous_response_id）路由回原先处理它的账号
+  - 临时不可调度状态只作用于当前账号；账号 RPM 配置保留在调度投影中
+  - 清洗工具参数定义里的非法 null required、元组数组，减少上游 400
+  - 流内失败按 error.status 分类；流式协议错误只发一次；剥离超长 input item ID
+  - 计费：支持按推理力度配置倍率（取代原来只针对 max 档的倍率字段，239 号 migration 自动迁移旧配置）
+- 其余上游新功能（OpenCode Go 用量窗口、Claude Code 版本号自动同步、月度备份归档、推广线下提现、Codex 积分与推荐邀请等）随合并一并带入，默认行为与上游一致。
+### Design Rationale
+- 选择整体合并而不是挑几个修复：冲突只有 25 个文件、44 处，最大一处 86 行；挑拣会让本分支和上游越离越远，下次合并更难。
+- GPT-6 Sol/Luna：上游合并的正是本分支 .12 移植过的 PR #7509，逻辑相同。冲突处保留 .12 的三处改法——按规范名区分 Sol/Luna 的静态价卡、none 档同时认顶层 reasoning_effort、不在本地拦截 Chat-only 账号的"工具 + 推理"请求（上游 v0.2.8 会直接回 400，本分支删除该拦截并把对应测试改为"原样转发"）。
+- 价卡 JSON 里两边各插了一份 gpt-6-sol/gpt-6-luna，git 没报冲突但留下了重复键，已删去一份（两份内容逐字相同）。
+- 设置项冲突一律两边都保留：本分支的打票、降智阻断设置，加上上游新增的 Claude Code 版本号设置。账号更新 SQL 两边都加了列，合并后列顺序与读取顺序逐一对齐：本分支的 current_extra 在前，上游的三个 OpenCode Go 列在后。
+- 上游去掉了 ModelPricing.MaxReasoningEffortMultiplier 和 Fable 5.1 专用的 max 档倍率，改为通用的按推理力度倍率；本分支跟随上游，删掉了冲突解决时带进来的那一行旧引用。
+### Notes & Caveats
+- 上线会新执行 3 个 migration（238b、239、240），都只改小表，不涉及 usage_logs。
+- 测试：go test ./... 与 go test -tags=unit ./... 结果见提交说明；前端 vitest 333 个文件、2499 个用例全部通过（此前两个老失败已由上游修复），vue-tsc 与 eslint 通过。
+- 降智观察（按账号生成速度判断）另在分支 wip/downgrade-observe 开发，不在本版本内。
+
 ## [0.2.5-session-capacity-antistorm.12] - 2026-09-23
 ### Features
 - 支持 `gpt-6-sol` / `gpt-6-luna`：模型列表与显示名、客户端写法归一（含 `-high` 等档位后缀和 `-openai-compact`）、Codex 模型清单（推理档位 low–max、默认 medium、Fast 档、图片输入）、`effort=max` 与 `reasoning.mode` 原样透传、Messages 兼容路径的 `prompt_cache_key` 注入。
