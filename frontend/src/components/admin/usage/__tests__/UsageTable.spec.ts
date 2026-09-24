@@ -69,6 +69,7 @@ const messages: Record<string, string> = {
 	'usage.requestedModel': 'Requested',
 	'usage.sentUpstreamModel': 'Sent upstream',
 	'usage.upstreamResponseModel': 'Upstream response',
+	'usage.upstreamFasterModel': 'Upstream downgrade mark',
 	'usage.modelVariant': 'Possible version variant',
 	'usage.modelMismatch': 'Different model',
 }
@@ -480,6 +481,22 @@ describe('admin UsageTable tooltip', () => {
 		expect(text).toContain('gpt-5.5')
 		expect(text).toContain(responseModel)
 		expect(text).toContain(expectedBadge)
+	})
+
+	it('shows the upstream downgrade mark only when recorded', () => {
+		const mountRow = (row: Record<string, unknown>) => mount(UsageTable, {
+			props: { data: [row], loading: false, columns: [] },
+			global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+		})
+
+		const marked = mountRow({ request_id: 'req-marked', model: 'gpt-6-astra', upstream_faster_model: 'gpt-5.6-luna' })
+		const mark = marked.find('[data-testid="upstream-faster-model"]')
+		expect(mark.exists()).toBe(true)
+		expect(mark.text()).toContain('Upstream downgrade mark')
+		expect(mark.text()).toContain('gpt-5.6-luna')
+
+		const unmarked = mountRow({ request_id: 'req-unmarked', model: 'gpt-6-astra', upstream_faster_model: null })
+		expect(unmarked.find('[data-testid="upstream-faster-model"]').exists()).toBe(false)
 	})
 
   it.each([

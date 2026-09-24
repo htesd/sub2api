@@ -150,6 +150,11 @@
           <Select v-model="filters.upstream_model_mismatch" :options="upstreamModelMismatchOptions" @change="emitChange" />
         </div>
 
+        <div v-if="mode === 'usage'" class="w-full sm:w-auto sm:min-w-[200px]">
+          <label class="input-label">{{ t('admin.usage.upstreamDowngradeMark') }}</label>
+          <Select v-model="filters.upstream_downgrade_marked" :options="upstreamDowngradeMarkOptions" @change="emitChange" />
+        </div>
+
         <!-- Error Phase Filter (errors only) -->
         <div v-if="mode === 'errors'" class="w-full sm:w-auto sm:min-w-[180px]">
           <label class="input-label">{{ t('admin.ops.errorLog.type') }}</label>
@@ -327,6 +332,12 @@ const upstreamModelMismatchOptions = ref<SelectOption[]>([
   { value: null, label: t('admin.usage.allUpstreamModelAudit') },
   { value: true, label: t('admin.usage.upstreamModelMismatchOnly') },
   { value: false, label: t('admin.usage.upstreamModelMatchedOnly') }
+])
+
+const upstreamDowngradeMarkOptions = ref<SelectOption[]>([
+  { value: null, label: t('admin.usage.allUpstreamDowngradeMark') },
+  { value: true, label: t('admin.usage.upstreamDowngradeMarkedOnly') },
+  { value: false, label: t('admin.usage.upstreamDowngradeUnmarkedOnly') }
 ])
 
 const emitChange = () => emit('change')

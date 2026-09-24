@@ -1,3 +1,15 @@
+## [0.2.8-session-capacity-antistorm.14] - 2026-09-24
+### Features
+- 新增「降智观察」开关（网关服务 → Codex 设置），和「降智阻断」分开：开观察只记录不阻断；开阻断一定同时观察。保存后 5 秒内热生效。
+- 观察开启时，把上游响应头 `X-Codex-Safety-Buffering-Faster-Model` 的值写进使用记录新列 `usage_logs.upstream_faster_model`；后台使用记录页在模型列下显示「↳ 上游降级标记」，并可按「仅有标记 / 仅无标记」筛选（列表与统计接口参数 `upstream_downgrade_marked`）。
+- 覆盖 Responses、passthrough、Chat Completions、Messages、WS→HTTP 桥五条 OpenAI 转发路径；换号重试时标记随新的转发尝试重置，记下的是最终成功那个账号的响应头。
+### Design Rationale
+- 用户要求先把这个响应头的数据记下来自行观察，再决定判据。09-23 实测新号老号都带这个头、值都是 gpt-5.6-luna，所以它目前不能单独当降级判据；按账号生成速度的判据留待看完数据后再做。
+- 只观察不改任何转发、换号、冷却和计费行为；观察范围不受「降智阻断的模型名单」限制，所有模型都记。
+### Notes & Caveats
+- 新 migration `239x_add_usage_log_upstream_faster_model.sql`：可空、无默认值的新列，只改表定义不重写 usage_logs，不建索引（避免启动时扫大表）。按标记筛选依赖 created_at 范围缩小扫描量。
+- 普通用户的使用记录不输出这个字段。
+
 ## [0.2.8-session-capacity-antistorm.13] - 2026-09-24
 ### Features
 - 整体合并上游 v0.2.8（Wei-Shaw/sub2api，2026-09-23，本分支原基线为 09-15 的 0.2.5，落后 307 个提交）。对本站（只跑 OpenAI OAuth 号）有用的主要是：

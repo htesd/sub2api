@@ -1827,6 +1827,8 @@ export interface AdminUsageLog extends UsageLog {
   upstream_reasoning_effort?: string | null
   upstream_response_model?: string | null
   upstream_model_mismatch?: boolean | null
+  // 上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（降智观察开启时记录，仅管理员可见）
+  upstream_faster_model?: string | null
   model_mapping_chain?: string | null
   upstream_request_id?: string | null
 

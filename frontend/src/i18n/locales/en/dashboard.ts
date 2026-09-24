@@ -365,6 +365,8 @@ export default {
     upstreamModel: 'Upstream',
 	  sentUpstreamModel: 'Sent upstream',
 	  upstreamResponseModel: 'Upstream response',
+	  upstreamFasterModel: 'Upstream downgrade mark',
+	  upstreamFasterModelHint: 'Value of the upstream X-Codex-Safety-Buffering-Faster-Model response header; recorded only while downgrade observation or blocking is on',
 	  upstreamModelMismatch: 'Response model mismatch',
 	  modelVariant: 'Possible version variant',
 	  modelMismatch: 'Different model',

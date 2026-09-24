@@ -4525,6 +4525,16 @@
                 </div>
                 <div class="flex items-center justify-between gap-4">
                   <div>
+                    <h3 class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexDowngradeObserve") }}</h3>
+                    <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexDowngradeObserveDesc") }}</p>
+                    <p v-if="form.openai_codex_downgrade_block_enabled && !form.openai_codex_downgrade_observe_enabled" class="mt-1 text-sm text-amber-600 dark:text-amber-400">
+                      {{ t("admin.settings.gatewayForwarding.codexDowngradeObserveImplied") }}
+                    </p>
+                  </div>
+                  <Toggle id="codex-downgrade-observe" v-model="form.openai_codex_downgrade_observe_enabled" />
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
                     <h3 class="text-base font-semibold">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlock") }}</h3>
                     <p class="mt-1 text-sm text-gray-500">{{ t("admin.settings.gatewayForwarding.codexDowngradeBlockDesc") }}</p>
                   </div>
@@ -10056,6 +10066,7 @@ const form = reactive<SettingsForm>({
   openai_codex_ticket_harvest_loop_enabled: false,
   openai_codex_ticket_required_models: "",
   openai_codex_downgrade_block_enabled: false,
+  openai_codex_downgrade_observe_enabled: false,
   openai_codex_downgrade_block_minutes: 30,
   openai_codex_downgrade_block_models: "gpt-6-astra",
   openai_codex_ticket_harvest_proxy_url: "",
@@ -11696,6 +11707,7 @@ async function saveSettings() {
       openai_codex_ticket_harvest_loop_enabled: form.openai_codex_ticket_harvest_loop_enabled,
       openai_codex_ticket_required_models: form.openai_codex_ticket_required_models,
       openai_codex_downgrade_block_enabled: form.openai_codex_downgrade_block_enabled,
+      openai_codex_downgrade_observe_enabled: form.openai_codex_downgrade_observe_enabled,
       openai_codex_downgrade_block_minutes: Number(form.openai_codex_downgrade_block_minutes) || 30,
       openai_codex_downgrade_block_models: form.openai_codex_downgrade_block_models,
       openai_codex_ticket_harvest_proxy_url:

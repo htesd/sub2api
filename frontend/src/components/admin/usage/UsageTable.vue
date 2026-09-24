@@ -87,6 +87,14 @@
                 {{ isLikelyModelVariant(row) ? t('usage.modelVariant') : t('usage.modelMismatch') }}
               </span>
             </div>
+            <div
+              v-if="row.upstream_faster_model"
+              data-testid="upstream-faster-model"
+              class="break-all pl-3 text-[11px] text-rose-600 dark:text-rose-400"
+              :title="t('usage.upstreamFasterModelHint')"
+            >
+              <span class="mr-1">↳ {{ t('usage.upstreamFasterModel') }}:</span>{{ row.upstream_faster_model }}
+            </div>
           </div>
         </template>
 

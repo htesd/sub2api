@@ -370,6 +370,8 @@ export default {
     upstreamModel: '上游',
 	  sentUpstreamModel: '发往上游',
 	  upstreamResponseModel: '上游响应',
+	  upstreamFasterModel: '上游降级标记',
+	  upstreamFasterModelHint: '上游响应头 X-Codex-Safety-Buffering-Faster-Model 的值，仅在降智观察或降智阻断开启时记录',
 	  upstreamModelMismatch: '上游响应模型不一致',
 	  modelVariant: '疑似版本变体',
 	  modelMismatch: '模型不一致',
