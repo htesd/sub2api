@@ -685,6 +685,9 @@ type AdminUsageLog struct {
 	UpstreamResponseModel *string `json:"upstream_response_model,omitempty"`
 	// UpstreamModelMismatch is nil when the upstream did not declare a model.
 	UpstreamModelMismatch *bool `json:"upstream_model_mismatch,omitempty"`
+	// UpstreamFasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（上游自报
+	// 本轮换成的更快模型），仅管理员可见；上游没给时省略。
+	UpstreamFasterModel *string `json:"upstream_faster_model,omitempty"`
 
 	// ChannelID 渠道 ID
 	ChannelID *int64 `json:"channel_id,omitempty"`

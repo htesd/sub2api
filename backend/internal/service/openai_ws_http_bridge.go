@@ -561,6 +561,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 			return nil, fmt.Errorf("upstream http bridge request failed: %s", safeErr)
 		}
+		if s.openAICodexDowngradePolicy(ctx).Observing() {
+			responseModelObserver.ObserveOpenAIFasterModelHeader(account, actualModel, resp.Header)
+		}
 		if resp.StatusCode < 400 {
 			break
 		}
@@ -661,6 +664,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			Model:                         originalModel,
 			UpstreamModel:                 mappedModel,
 			UpstreamResponseModel:         responseModelObserver.Model(),
+			UpstreamFasterModel:           responseModelObserver.FasterModel(),
 			UpstreamResponseModelConflict: responseModelObserver.Conflict(),
 			UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
 			ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(body)),

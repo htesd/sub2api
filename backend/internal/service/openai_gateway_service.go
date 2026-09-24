@@ -251,6 +251,9 @@ type OpenAIForwardResult struct {
 	// response before any client-facing rewrite or protocol conversion.
 	UpstreamResponseModel         string
 	UpstreamResponseModelConflict bool
+	// UpstreamFasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（上游自报本轮
+	// 换成的更快模型），只观察记录，见 openai_upstream_faster_model.go。
+	UpstreamFasterModel string
 	// UpstreamResponseServiceTier is the tier the upstream reports having used
 	// (response service_tier: "priority" / "default" / "flex" / ...); "" when not declared.
 	UpstreamResponseServiceTier string

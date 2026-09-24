@@ -260,6 +260,7 @@ type UpdateSettingsRequest struct {
 	OpenAICodexTicketEnabled               *bool   `json:"openai_codex_ticket_enabled"`
 	OpenAICodexTicketHarvestLoopEnabled    *bool   `json:"openai_codex_ticket_harvest_loop_enabled"`
 	OpenAICodexTicketRequiredModels        *string `json:"openai_codex_ticket_required_models"`
+	OpenAICodexDowngradeObserveEnabled     *bool   `json:"openai_codex_downgrade_observe_enabled"`
 	OpenAICodexDowngradeBlockEnabled       *bool   `json:"openai_codex_downgrade_block_enabled"`
 	OpenAICodexDowngradeBlockMinutes       *int    `json:"openai_codex_downgrade_block_minutes"`
 	OpenAICodexDowngradeBlockModels        *string `json:"openai_codex_downgrade_block_models"`
@@ -508,6 +509,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	// 新策略需要保留“尚未配置”与“显式清空”的区别。
 	if req.OpenAICodexTicketRequiredModels == nil {
 		omitted[service.SettingKeyOpenAICodexTicketRequiredModels] = struct{}{}
+	}
+	if req.OpenAICodexDowngradeObserveEnabled == nil {
+		omitted[service.SettingKeyOpenAICodexDowngradeObserveEnabled] = struct{}{}
 	}
 	if req.OpenAICodexDowngradeBlockEnabled == nil {
 		omitted[service.SettingKeyOpenAICodexDowngradeBlockEnabled] = struct{}{}
@@ -1814,6 +1818,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAICodexTicketHarvestLoopEnabled
 		}(),
+		OpenAICodexDowngradeObserveEnabled: func() bool {
+			if req.OpenAICodexDowngradeObserveEnabled != nil {
+				return *req.OpenAICodexDowngradeObserveEnabled
+			}
+			return previousSettings.OpenAICodexDowngradeObserveEnabled
+		}(),
 		OpenAICodexDowngradeBlockEnabled: func() bool {
 			if req.OpenAICodexDowngradeBlockEnabled != nil {
 				return *req.OpenAICodexDowngradeBlockEnabled
@@ -2407,6 +2417,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		OpenAICodexTicketEnabled:                               updatedSettings.OpenAICodexTicketEnabled,
 		OpenAICodexTicketHarvestLoopEnabled:                    updatedSettings.OpenAICodexTicketHarvestLoopEnabled,
 		OpenAICodexTicketRequiredModels:                        updatedSettings.OpenAICodexTicketRequiredModels,
+		OpenAICodexDowngradeObserveEnabled:                     updatedSettings.OpenAICodexDowngradeObserveEnabled,
 		OpenAICodexDowngradeBlockEnabled:                       updatedSettings.OpenAICodexDowngradeBlockEnabled,
 		OpenAICodexDowngradeBlockMinutes:                       updatedSettings.OpenAICodexDowngradeBlockMinutes,
 		OpenAICodexDowngradeBlockModels:                        updatedSettings.OpenAICodexDowngradeBlockModels,

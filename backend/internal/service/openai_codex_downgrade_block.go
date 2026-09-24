@@ -37,11 +37,17 @@ const (
 	openAICodexSafetyBufferingModelHeader = "X-Codex-Safety-Buffering-Faster-Model"
 )
 
-// OpenAICodexDowngradePolicy 是降智阻断的生效配置。
+// OpenAICodexDowngradePolicy 是降智阻断 / 降智观察的生效配置。
 type OpenAICodexDowngradePolicy struct {
-	Enabled  bool
+	Enabled  bool // 降智阻断
+	Observe  bool // 降智观察：只记录上游降级标记，不阻断
 	Cooldown time.Duration
 	Models   []string
+}
+
+// Observing 报告是否记录上游降级标记：单独开观察，或开了阻断（阻断一定同时观察）。
+func (p OpenAICodexDowngradePolicy) Observing() bool {
+	return p.Observe || p.Enabled
 }
 
 // NormalizeOpenAICodexDowngradeMinutes 约束冷却时长，0/负值回落默认值。
@@ -87,7 +93,7 @@ type cachedOpenAICodexDowngradePolicy struct {
 }
 
 // ResolveOpenAICodexDowngradePolicy 读取后台设置（5 秒缓存），缺键时回落默认值：
-// 关闭、30 分钟、仅 gpt-6-astra。
+// 阻断与观察都关闭、30 分钟、仅 gpt-6-astra。
 func (s *SettingService) ResolveOpenAICodexDowngradePolicy(ctx context.Context) OpenAICodexDowngradePolicy {
 	fallback := OpenAICodexDowngradePolicy{
 		Enabled:  false,
@@ -112,6 +118,7 @@ func (s *SettingService) ResolveOpenAICodexDowngradePolicy(ctx context.Context) 
 	defer cancel()
 	values, err := s.settingRepo.GetMultiple(dbCtx, []string{
 		SettingKeyOpenAICodexDowngradeBlockEnabled,
+		SettingKeyOpenAICodexDowngradeObserveEnabled,
 		SettingKeyOpenAICodexDowngradeBlockMinutes,
 		SettingKeyOpenAICodexDowngradeBlockModels,
 	})
@@ -121,6 +128,9 @@ func (s *SettingService) ResolveOpenAICodexDowngradePolicy(ctx context.Context) 
 	policy := fallback
 	if raw, ok := values[SettingKeyOpenAICodexDowngradeBlockEnabled]; ok {
 		policy.Enabled = strings.TrimSpace(raw) == "true"
+	}
+	if raw, ok := values[SettingKeyOpenAICodexDowngradeObserveEnabled]; ok {
+		policy.Observe = strings.TrimSpace(raw) == "true"
 	}
 	if raw, ok := values[SettingKeyOpenAICodexDowngradeBlockMinutes]; ok {
 		if minutes, convErr := strconv.Atoi(strings.TrimSpace(raw)); convErr == nil {

@@ -306,6 +306,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		OpenAICodexTicketEnabled:                               settings.OpenAICodexTicketEnabled,
 		OpenAICodexTicketHarvestLoopEnabled:                    settings.OpenAICodexTicketHarvestLoopEnabled,
 		OpenAICodexTicketRequiredModels:                        settings.OpenAICodexTicketRequiredModels,
+		OpenAICodexDowngradeObserveEnabled:                     settings.OpenAICodexDowngradeObserveEnabled,
 		OpenAICodexDowngradeBlockEnabled:                       settings.OpenAICodexDowngradeBlockEnabled,
 		OpenAICodexDowngradeBlockMinutes:                       settings.OpenAICodexDowngradeBlockMinutes,
 		OpenAICodexDowngradeBlockModels:                        settings.OpenAICodexDowngradeBlockModels,

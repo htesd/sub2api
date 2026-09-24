@@ -283,8 +283,10 @@ type UsageLogFilters struct {
 	BillingType           *int8
 	BillingMode           string
 	UpstreamModelMismatch *bool
-	StartTime             *time.Time
-	EndTime               *time.Time
+	// UpstreamDowngradeMarked 按上游降级标记（usage_logs.upstream_faster_model 是否为空）筛选。
+	UpstreamDowngradeMarked *bool
+	StartTime               *time.Time
+	EndTime                 *time.Time
 	// ExactTotal requests exact COUNT(*) for pagination. Default false for fast large-table paging.
 	ExactTotal bool
 }

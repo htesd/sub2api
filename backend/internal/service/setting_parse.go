@@ -919,6 +919,9 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.OpenAICodexDowngradeBlockMinutes = openAICodexDowngradeDefaultMinutes
 	result.OpenAICodexDowngradeBlockModels = strings.Join(NormalizeOpenAICodexDowngradeModels(""), ",")
+	if raw, ok := settings[SettingKeyOpenAICodexDowngradeObserveEnabled]; ok {
+		result.OpenAICodexDowngradeObserveEnabled = raw == "true"
+	}
 	if raw, ok := settings[SettingKeyOpenAICodexDowngradeBlockEnabled]; ok {
 		result.OpenAICodexDowngradeBlockEnabled = raw == "true"
 	}

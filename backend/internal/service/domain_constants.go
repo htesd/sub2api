@@ -719,8 +719,11 @@ const (
 	// 降智阻断：上游把 gpt-6 请求降级成更快的模型（X-Codex-Safety-Buffering-Faster-Model）时，
 	// 冷却该账号的该模型并换号；全部账号都被降级时给客户端可重试错误。默认关闭。
 	SettingKeyOpenAICodexDowngradeBlockEnabled = "openai_codex_downgrade_block_enabled"
-	SettingKeyOpenAICodexDowngradeBlockMinutes = "openai_codex_downgrade_block_minutes"
-	SettingKeyOpenAICodexDowngradeBlockModels  = "openai_codex_downgrade_block_models"
+	// 降智观察：只记录上游降级标记（X-Codex-Safety-Buffering-Faster-Model）到使用记录，
+	// 不冷却、不换号。阻断开启时一定同时观察。默认关闭。
+	SettingKeyOpenAICodexDowngradeObserveEnabled = "openai_codex_downgrade_observe_enabled"
+	SettingKeyOpenAICodexDowngradeBlockMinutes   = "openai_codex_downgrade_block_minutes"
+	SettingKeyOpenAICodexDowngradeBlockModels    = "openai_codex_downgrade_block_models"
 	// SettingKeyOpenAICodexTicketHarvestProxyURL Codex 292 打票出口（socks5h/http），后台可改、热更新。
 	SettingKeyOpenAICodexTicketHarvestProxyURL = "openai_codex_ticket_harvest_proxy_url"
 	// SettingKeyClaudeCodeClientVersion 网关对 Anthropic 上游声明的 Claude Code CLI 客户端版本号（管理员覆写）。

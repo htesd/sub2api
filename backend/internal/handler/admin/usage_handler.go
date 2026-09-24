@@ -159,6 +159,16 @@ func (h *UsageHandler) List(c *gin.Context) {
 		upstreamModelMismatch = &value
 	}
 
+	var upstreamDowngradeMarked *bool
+	if raw := strings.TrimSpace(c.Query("upstream_downgrade_marked")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			response.BadRequest(c, "Invalid upstream_downgrade_marked value, use true or false")
+			return
+		}
+		upstreamDowngradeMarked = &value
+	}
+
 	// Parse date range
 	var startTime, endTime *time.Time
 	userTZ := c.Query("timezone") // Get user's timezone from request
@@ -189,22 +199,23 @@ func (h *UsageHandler) List(c *gin.Context) {
 		SortOrder: c.DefaultQuery("sort_order", "desc"),
 	}
 	filters := usagestats.UsageLogFilters{
-		UserID:                userID,
-		APIKeyID:              apiKeyID,
-		AccountID:             accountID,
-		GroupID:               groupID,
-		RequestID:             requestID,
-		Model:                 model,
-		ModelFilterSource:     usagestats.ModelSourceRequested,
-		RequestType:           requestType,
-		Stream:                stream,
-		NativeCompactionV2:    nativeCompactionV2,
-		BillingType:           billingType,
-		BillingMode:           billingMode,
-		UpstreamModelMismatch: upstreamModelMismatch,
-		StartTime:             startTime,
-		EndTime:               endTime,
-		ExactTotal:            exactTotal,
+		UserID:                  userID,
+		APIKeyID:                apiKeyID,
+		AccountID:               accountID,
+		GroupID:                 groupID,
+		RequestID:               requestID,
+		Model:                   model,
+		ModelFilterSource:       usagestats.ModelSourceRequested,
+		RequestType:             requestType,
+		Stream:                  stream,
+		NativeCompactionV2:      nativeCompactionV2,
+		BillingType:             billingType,
+		BillingMode:             billingMode,
+		UpstreamModelMismatch:   upstreamModelMismatch,
+		UpstreamDowngradeMarked: upstreamDowngradeMarked,
+		StartTime:               startTime,
+		EndTime:                 endTime,
+		ExactTotal:              exactTotal,
 	}
 
 	records, result, err := h.usageService.ListWithFilters(c.Request.Context(), params, filters)
@@ -310,6 +321,16 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 		upstreamModelMismatch = &value
 	}
 
+	var upstreamDowngradeMarked *bool
+	if raw := strings.TrimSpace(c.Query("upstream_downgrade_marked")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			response.BadRequest(c, "Invalid upstream_downgrade_marked value, use true or false")
+			return
+		}
+		upstreamDowngradeMarked = &value
+	}
+
 	// Parse date range
 	userTZ := c.Query("timezone")
 	now := timezone.NowInUserLocation(userTZ)
@@ -349,20 +370,21 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 
 	// Build filters and call GetStatsWithFilters
 	filters := usagestats.UsageLogFilters{
-		UserID:                userID,
-		APIKeyID:              apiKeyID,
-		AccountID:             accountID,
-		GroupID:               groupID,
-		Model:                 model,
-		ModelFilterSource:     usagestats.ModelSourceRequested,
-		RequestType:           requestType,
-		Stream:                stream,
-		NativeCompactionV2:    nativeCompactionV2,
-		BillingType:           billingType,
-		BillingMode:           billingMode,
-		UpstreamModelMismatch: upstreamModelMismatch,
-		StartTime:             &startTime,
-		EndTime:               &endTime,
+		UserID:                  userID,
+		APIKeyID:                apiKeyID,
+		AccountID:               accountID,
+		GroupID:                 groupID,
+		Model:                   model,
+		ModelFilterSource:       usagestats.ModelSourceRequested,
+		RequestType:             requestType,
+		Stream:                  stream,
+		NativeCompactionV2:      nativeCompactionV2,
+		BillingType:             billingType,
+		BillingMode:             billingMode,
+		UpstreamModelMismatch:   upstreamModelMismatch,
+		UpstreamDowngradeMarked: upstreamDowngradeMarked,
+		StartTime:               &startTime,
+		EndTime:                 &endTime,
 	}
 
 	var stats *usagestats.UsageStats

@@ -36,6 +36,10 @@ type upstreamResponseModelObserver struct {
 	firstTier         string
 	firstTierConflict bool
 	terminalTier      string
+
+	// fasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（上游自己标记
+	// 本轮换成了哪个更快的模型）。只观察记录，不参与转发与计费，见 openai_upstream_faster_model.go。
+	fasterModel string
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {

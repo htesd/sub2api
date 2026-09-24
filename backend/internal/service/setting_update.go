@@ -503,6 +503,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyOpenAICodexTicketEnabled] = strconv.FormatBool(settings.OpenAICodexTicketEnabled)
 	updates[SettingKeyOpenAICodexTicketHarvestLoopEnabled] = strconv.FormatBool(settings.OpenAICodexTicketHarvestLoopEnabled)
 	updates[SettingKeyOpenAICodexTicketRequiredModels] = strings.Join(NormalizeCodexTicketRequiredModels(settings.OpenAICodexTicketRequiredModels), ",")
+	updates[SettingKeyOpenAICodexDowngradeObserveEnabled] = strconv.FormatBool(settings.OpenAICodexDowngradeObserveEnabled)
 	updates[SettingKeyOpenAICodexDowngradeBlockEnabled] = strconv.FormatBool(settings.OpenAICodexDowngradeBlockEnabled)
 	updates[SettingKeyOpenAICodexDowngradeBlockMinutes] = strconv.Itoa(NormalizeOpenAICodexDowngradeMinutes(settings.OpenAICodexDowngradeBlockMinutes))
 	updates[SettingKeyOpenAICodexDowngradeBlockModels] = strings.Join(NormalizeOpenAICodexDowngradeModels(settings.OpenAICodexDowngradeBlockModels), ",")

@@ -491,6 +491,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.OpenAICodexTicketRequiredModels != after.OpenAICodexTicketRequiredModels {
 		changed = append(changed, "openai_codex_ticket_required_models")
 	}
+	if before.OpenAICodexDowngradeObserveEnabled != after.OpenAICodexDowngradeObserveEnabled {
+		changed = append(changed, "openai_codex_downgrade_observe_enabled")
+	}
 	if before.OpenAICodexDowngradeBlockEnabled != after.OpenAICodexDowngradeBlockEnabled {
 		changed = append(changed, "openai_codex_downgrade_block_enabled")
 	}

@@ -417,6 +417,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}
+	s.observeOpenAIUpstreamFasterModel(ctx, c, account, upstreamModel, resp.Header)
 	defer func() {
 		cancelUpstream()
 		_ = resp.Body.Close()
@@ -653,6 +654,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 		BillingModel:                  billingModel,
 		UpstreamModel:                 upstreamModel,
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
+		UpstreamFasterModel:           observedUpstreamFasterModel(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
 		Stream:                        false,
@@ -786,6 +788,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			BillingModel:                  billingModel,
 			UpstreamModel:                 upstreamModel,
 			UpstreamResponseModel:         observedUpstreamResponseModel(c),
+			UpstreamFasterModel:           observedUpstreamFasterModel(c),
 			UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 			UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
 			Stream:                        true,

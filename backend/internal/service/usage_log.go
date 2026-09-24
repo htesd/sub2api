@@ -120,6 +120,9 @@ type UsageLog struct {
 	// UpstreamModelMismatch is nil when no upstream model was observed. Otherwise
 	// it compares UpstreamResponseModel with the actual model sent upstream.
 	UpstreamModelMismatch *bool
+	// UpstreamFasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值：上游自报
+	// 本轮换成的更快模型。nil 表示上游没有给出该标记。只观察记录，不参与计费。
+	UpstreamFasterModel *string
 	// ChannelID 渠道 ID
 	ChannelID *int64
 	// ModelMappingChain 模型映射链，如 "a→b→c"
