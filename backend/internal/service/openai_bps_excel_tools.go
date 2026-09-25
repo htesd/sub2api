@@ -413,6 +413,37 @@ func openAIBpsEnvelopeIsWrapper(envelope map[string]any) bool {
 	return false
 }
 
+// openAIBpsNormalizeEnvelopeAliases 归一信封键名别名：生产实测模型会写成
+// {"tool": "...", "args": {...}}（2026-09-26 日志 envelope_keys=args,tool），
+// 指引里的 name/arguments 只是约定。就地修改 envelope（解码产物，无共享）。
+func openAIBpsNormalizeEnvelopeAliases(envelope map[string]any) {
+	if envelope == nil {
+		return
+	}
+	if name, _ := envelope["name"].(string); strings.TrimSpace(name) == "" {
+		for _, alias := range []string{"tool", "tool_name", "function"} {
+			if v, ok := envelope[alias].(string); ok && strings.TrimSpace(v) != "" {
+				envelope["name"] = v
+				break
+			}
+		}
+	}
+	if _, ok := envelope["arguments"]; !ok {
+		for _, alias := range []string{"args", "parameters", "params"} {
+			if v, exists := envelope[alias]; exists {
+				envelope["arguments"] = v
+				break
+			}
+		}
+	}
+	if _, ok := envelope["input"]; !ok {
+		// custom 工具的 input 也可能被写成 args（字符串形态）。
+		if v, ok := envelope["args"].(string); ok {
+			envelope["input"] = v
+		}
+	}
+}
+
 // openAIBpsTransportEnvelope 从 run_officejs 原生调用里解出客户端工具信封；
 // 最多拆 openAIBpsTransportMaxUnwrap 层嵌套（模型偶尔再套几层），解出来还是
 // 传输名则判失败。外层 arguments 与每层的 code 都走宽松解析。
@@ -457,6 +488,7 @@ func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 		}
 		envelope = next
 	}
+	openAIBpsNormalizeEnvelopeAliases(envelope)
 	if envelope != nil && openAIBpsIsTransportName(envelope["name"]) {
 		return nil
 	}

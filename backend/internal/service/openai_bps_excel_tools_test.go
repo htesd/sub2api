@@ -448,3 +448,28 @@ func TestOpenAIBpsTransportEnvelopeNamelessShell(t *testing.T) {
 	_, ok := openAIBpsExtractNativeToolCall(native3, openAIBpsTestSpecs())
 	require.False(t, ok)
 }
+
+func TestOpenAIBpsTransportEnvelopeToolArgsAliases(t *testing.T) {
+	// 生产实测形态（2026-09-26 envelope_keys=args,tool）：{"tool":..., "args":{...}}。
+	native := openAIBpsNativeTransportCall(`{"tool":"exec_command","args":{"cmd":"pwd"}}`)
+	envelope := openAIBpsTransportEnvelope(native)
+	require.NotNil(t, envelope)
+	require.Equal(t, "exec_command", envelope["name"])
+	extracted, ok := openAIBpsExtractNativeToolCall(native, openAIBpsTestSpecs())
+	require.True(t, ok)
+	require.Equal(t, "exec_command", extracted["name"])
+	require.JSONEq(t, `{"cmd":"pwd"}`, extracted["arguments"].(string))
+
+	// 别名的值是 JSON 字符串也能解。
+	native2 := openAIBpsNativeTransportCall(`{"tool":"exec_command","args":"{\"cmd\":\"ls\"}"}`)
+	extracted2, ok2 := openAIBpsExtractNativeToolCall(native2, openAIBpsTestSpecs())
+	require.True(t, ok2)
+	require.JSONEq(t, `{"cmd":"ls"}`, extracted2["arguments"].(string))
+
+	// custom 工具：args 字符串落到 input。
+	customNative := openAIBpsNativeTransportCall(`{"tool":"apply_patch","args":"patch-body"}`)
+	extracted3, ok3 := openAIBpsExtractNativeToolCall(customNative, openAIBpsTestSpecs())
+	require.True(t, ok3)
+	require.Equal(t, "custom_tool_call", extracted3["type"])
+	require.Equal(t, "patch-body", extracted3["input"])
+}

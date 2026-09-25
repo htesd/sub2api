@@ -1,3 +1,10 @@
+## [0.2.8-session-capacity-antistorm.20] - 2026-09-26
+### Bug Fixes
+- bps 工具信封键名别名归一：.19 的键名日志当场抓到真实形态 `envelope_keys=args,tool`——模型把信封写成 `{"tool":"<工具名>","args":{...}}` 而非指引约定的 `{"name":...,"arguments":...}`，连续三轮 `tool_not_in_catalog`。现在 `tool`/`tool_name`/`function` 归一到 name，`args`/`parameters`/`params` 归一到 arguments，custom 工具的字符串 `args` 归一到 input；别名的值是 JSON 字符串也走宽松解析。
+
+### Notes & Caveats
+- 三连发布的排障链路值得记录：.18 首次给提取失败加原因码日志 → 抓到无名参数壳 → .19 穿透无名壳并补键名日志 → 抓到 `args,tool` 键名 → .20 别名归一。每一步都是生产日志直接指路，没有再靠猜。
+
 ## [0.2.8-session-capacity-antistorm.19] - 2026-09-26
 ### Bug Fixes
 - bps 工具中继再加固（.18 上线后由新增的原因码日志直接定位的残留形态）：模型为「遵守」不在 code 里放 run_officejs 名的指引，会把 `{summary, extended_summary, code, …}` 参数壳原样塞进 code、壳本身没有 `name` 字段 → 信封解得出但名字为空 → `tool_not_in_catalog` 直通死循环。现在无名但带 `code` 字段的层一律视为包装层穿透（目录信封顶层必有 `name`，不会误拆），拆包上限同步放宽到 6 层。
