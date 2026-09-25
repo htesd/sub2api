@@ -2,6 +2,8 @@ package service
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
@@ -201,13 +203,20 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 func (r *openAIBpsToolStreamRelay) finalizeNativeCall(buffered *openAIBpsBufferedNativeCall, fullItem map[string]any) []string {
 	extracted, reason := openAIBpsExtractNativeToolCallReason(fullItem, r.specs)
 	if extracted == nil {
-		envelopeName := ""
+		// 只记键名不落载荷：下次再出新形态时直接从日志看懂模型的写法。
+		envelopeName, envelopeKeys := "", ""
 		if env := openAIBpsTransportEnvelope(fullItem); env != nil {
 			envelopeName, _ = env["name"].(string)
+			keys := make([]string, 0, len(env))
+			for k := range env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			envelopeKeys = strings.Join(keys, ",")
 		}
 		logger.LegacyPrintf("service.openai_gateway",
-			"[bps] tool relay extract failed: reason=%s native_name=%v envelope_name=%s call_id=%v",
-			reason, fullItem["name"], envelopeName, fullItem["call_id"])
+			"[bps] tool relay extract failed: reason=%s native_name=%v envelope_name=%s envelope_keys=%s call_id=%v",
+			reason, fullItem["name"], envelopeName, envelopeKeys, fullItem["call_id"])
 		return r.nativePassthroughLines(buffered, fullItem)
 	}
 	// 原生条目按 call_id 缓存，供下一轮历史逐字节回放。

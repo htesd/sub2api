@@ -418,3 +418,33 @@ func TestOpenAIBpsExtractBareAndPrefixedNames(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "exec_command", extracted["name"])
 }
+
+func TestOpenAIBpsTransportEnvelopeNamelessShell(t *testing.T) {
+	// 生产实测形态（2026-09-26）：模型把 {summary, code} 参数壳原样塞进 code，
+	// 壳没有 name 字段 → 应穿透壳层解出 exec_command。
+	inner := `{"name":"exec_command","arguments":{"cmd":"ls"}}`
+	shell, _ := json.Marshal(map[string]any{
+		"summary": "Run client tool exec_command", "extended_summary": "relay",
+		"destructive": false, "references": []any{}, "code": inner,
+	})
+	native := openAIBpsNativeTransportCall(string(shell))
+	envelope := openAIBpsTransportEnvelope(native)
+	require.NotNil(t, envelope)
+	require.Equal(t, "exec_command", envelope["name"])
+
+	// 无名壳再套一层 run_officejs 也穿透。
+	shell2, _ := json.Marshal(map[string]any{"name": "run_officejs", "arguments": map[string]any{"code": string(shell)}})
+	native2 := openAIBpsNativeTransportCall(string(shell2))
+	envelope2 := openAIBpsTransportEnvelope(native2)
+	require.NotNil(t, envelope2)
+	require.Equal(t, "exec_command", envelope2["name"])
+
+	// 无名且无 code → 不是包装层，原样返回（提取阶段按 tool_not_in_catalog 拒绝）。
+	args, _ := json.Marshal(map[string]any{"code": `{"arguments":{"cmd":"ls"}}`})
+	native3 := map[string]any{"type": "function_call", "id": "fc_x", "call_id": "c_x",
+		"name": "run_officejs", "arguments": string(args)}
+	envelope3 := openAIBpsTransportEnvelope(native3)
+	require.NotNil(t, envelope3)
+	_, ok := openAIBpsExtractNativeToolCall(native3, openAIBpsTestSpecs())
+	require.False(t, ok)
+}

@@ -1,3 +1,11 @@
+## [0.2.8-session-capacity-antistorm.19] - 2026-09-26
+### Bug Fixes
+- bps 工具中继再加固（.18 上线后由新增的原因码日志直接定位的残留形态）：模型为「遵守」不在 code 里放 run_officejs 名的指引，会把 `{summary, extended_summary, code, …}` 参数壳原样塞进 code、壳本身没有 `name` 字段 → 信封解得出但名字为空 → `tool_not_in_catalog` 直通死循环。现在无名但带 `code` 字段的层一律视为包装层穿透（目录信封顶层必有 `name`，不会误拆），拆包上限同步放宽到 6 层。
+- 提取失败日志补充信封顶层键名（只记键名不落载荷），再出新形态可直接从日志看懂模型写法。
+
+### Notes & Caveats
+- .18 → .19 间隔约 40 分钟：.18 的日志在真实流量里当场抓到 `reason=tool_not_in_catalog envelope_name=`（约 21 秒一次、同一会话连续重试），本次修复即针对该形态；回归新增无名壳穿透测试。
+
 ## [0.2.8-session-capacity-antistorm.18] - 2026-09-26
 ### Bug Fixes
 - bps 工具中继加固。生产故障形态（2026-09-26 用户报告）：模型反复产出畸形/套娃信封 → 提取失败 → 原生 run_officejs 直通客户端 → 客户端回 "unsupported call: run_officejs" → 请求侧改写为协议重试指引 → 模型重复同类错误，工具循环卡死。修复四点：

@@ -388,8 +388,30 @@ func openAIBpsIsTransportName(name any) bool {
 }
 
 // openAIBpsTransportMaxUnwrap 是信封套娃的最大拆解层数（ghcp 只拆 2 层；生产
-// 出现过 run_officejs→run_officejs→…→exec 的三层形态，放宽到 4）。
-const openAIBpsTransportMaxUnwrap = 4
+// 出现过 run_officejs→run_officejs→…→exec 的三层形态，放宽到 6）。
+const openAIBpsTransportMaxUnwrap = 6
+
+// openAIBpsEnvelopeIsWrapper 判断解出的一层是否仍是包装层：名字是传输工具名，
+// 或没有名字但带 code 字段（模型「遵守」不放 run_officejs 名的指引时会把
+// {summary, code} 参数壳原样塞进 code 里——2026-09-26 生产实测形态，名字缺失
+// 导致 tool_not_in_catalog 死循环）。目录信封顶层必有 name，不会误拆。
+func openAIBpsEnvelopeIsWrapper(envelope map[string]any) bool {
+	if envelope == nil {
+		return false
+	}
+	name, _ := envelope["name"].(string)
+	if openAIBpsIsTransportName(name) {
+		return true
+	}
+	if strings.TrimSpace(name) != "" {
+		return false
+	}
+	switch envelope["code"].(type) {
+	case string, map[string]any:
+		return true
+	}
+	return false
+}
 
 // openAIBpsTransportEnvelope 从 run_officejs 原生调用里解出客户端工具信封；
 // 最多拆 openAIBpsTransportMaxUnwrap 层嵌套（模型偶尔再套几层），解出来还是
@@ -411,7 +433,7 @@ func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 	}
 	envelope := openAIBpsDecodeTransportCode(arguments["code"])
 	for i := 0; i < openAIBpsTransportMaxUnwrap; i++ {
-		if envelope == nil || !openAIBpsIsTransportName(envelope["name"]) {
+		if !openAIBpsEnvelopeIsWrapper(envelope) {
 			break
 		}
 		var nestedArguments map[string]any
@@ -422,9 +444,18 @@ func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 			nestedArguments = openAIBpsParseJSONObjectLoose(raw)
 		}
 		if nestedArguments == nil {
+			// 无名参数壳形态：code 直接在顶层，没有 arguments 层。
+			if _, hasArgs := envelope["arguments"]; !hasArgs {
+				nestedArguments = envelope
+			} else {
+				return nil
+			}
+		}
+		next := openAIBpsDecodeTransportCode(nestedArguments["code"])
+		if next == nil {
 			return nil
 		}
-		envelope = openAIBpsDecodeTransportCode(nestedArguments["code"])
+		envelope = next
 	}
 	if envelope != nil && openAIBpsIsTransportName(envelope["name"]) {
 		return nil
