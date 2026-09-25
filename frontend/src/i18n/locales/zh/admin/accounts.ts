@@ -835,6 +835,9 @@ export default {
         codexAutoMigrate: 'GPT-6 自动迁移代理',
         codexAutoMigrateDesc: '以 GPT-6/Astra 完整响应为准：原代理不可用时，从打票池中已登记的同地区代理取票并携票复验，成功后同步切换账号业务代理和票据。默认关闭，保存后热生效；健康路径每5分钟复验，失败按现有退避重试。沿用现有业务 session 伪装。',
         codexAutoMigrateRequiresProbe: '需要同时启用本账号门票机制、主动打票及系统后台主动打票开关。',
+        bpsExcelUpstream: 'Basispoints（Excel）上游',
+        bpsExcelUpstreamDesc:
+          '把符合条件的请求改道到 OpenAI Basispoints 后端（bps.openai.com，官方 ChatGPT Excel 加载项端点）。条件：模型为 gpt-6-astra / gpt-5.6-sol / terra / luna，且未声明客户端工具、无图片输入、无结构化输出、无 service_tier、未开启会话容量记账。不符合的请求仍在本账号走 Codex 上游。该端点不使用 turn-state 门票，目前实测 GPT-6 Astra 不触发降智（2026-09-25 验证）。默认关闭。',
         codexMigrationRoute: '代理 {from} → {to}',
         codexMigrationResults: {
           current_proxy_ok_no_ticket: '当前代理已返回 GPT-6，但未取得合格新票；保留出口并退避补票',

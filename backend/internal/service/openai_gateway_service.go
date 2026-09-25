@@ -323,14 +323,19 @@ const openAIResponsesUpstreamEndpoint = "/v1/responses"
 
 // stampOpenAIResponsesUpstreamEndpoint records that this attempt hit the
 // Responses API. OpenCode Go / CN accounts cannot derive that from inbound
-// path (DeriveUpstreamEndpoint falls back to the client URL).
+// path (DeriveUpstreamEndpoint falls back to the client URL). 走了 bps（Excel）
+// 上游的尝试标记为 bps 端点，便于在使用记录里区分真实出路。
 func stampOpenAIResponsesUpstreamEndpoint(c *gin.Context, result *OpenAIForwardResult) {
-	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
+	endpoint := openAIResponsesUpstreamEndpoint
+	if openAIBpsExcelUsed(c) {
+		endpoint = openAIBpsExcelUpstreamEndpoint
+	}
+	SetActualOpenAIUpstreamEndpoint(c, endpoint)
 	if result == nil {
 		return
 	}
 	if strings.TrimSpace(result.UpstreamEndpoint) == "" {
-		result.UpstreamEndpoint = openAIResponsesUpstreamEndpoint
+		result.UpstreamEndpoint = endpoint
 	}
 }
 

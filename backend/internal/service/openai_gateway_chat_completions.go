@@ -399,7 +399,8 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 
 	// The builder has already applied the admitted capacity assignment to both
 	// body and headers. A compatibility cache key must not overwrite it here.
-	if promptCacheKey != "" && !HasCodexSessionCapacity(c) {
+	// bps（Excel）上游不使用 codex session 头，跳过。
+	if promptCacheKey != "" && !HasCodexSessionCapacity(c) && !openAIBpsExcelUsed(c) {
 		apiKeyID := getAPIKeyIDFromContext(c)
 		sessionKey := promptCacheKey
 		if !compatPromptCacheTenantIsolated {

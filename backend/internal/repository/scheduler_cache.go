@@ -1028,6 +1028,9 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 走网关报 no available accounts"。
 		"openai_passthrough",
 		"openai_oauth_passthrough",
+		// bps（Excel）上游开关必须进投影：转发路径读到的账号来自本投影，
+		// 裁掉它开关会在调度缓存里静默失效（账号设置页显示已开，实际仍走 codex）。
+		service.OpenAIBpsExcelEnabledExtraKey,
 		"codex_fingerprint_mode",
 		"codex_fingerprint_seed",
 		"codex_5h_used_percent",

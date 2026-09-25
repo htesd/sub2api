@@ -1414,7 +1414,25 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	default:
 		targetURL = openaiPlatformAPIURL
 	}
-	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
+
+	// 账号级 Basispoints（Excel）上游选项：资格判定按请求进行（模型目录、客户端
+	// 工具、图片输入、结构化输出、service_tier、容量记账等任一不满足即留在 codex
+	// 上游），命中后请求体重写为 bps 白名单形状。重写失败只记日志并回落 codex 上游，
+	// 不让可转发的请求因为改道失败而报错。
+	useBpsExcel := false
+	if openAIBpsExcelRequestEligible(c, account, body) {
+		if rewritten, rewriteErr := rewriteOpenAIBodyForBpsExcel(body); rewriteErr == nil {
+			body = rewritten
+			targetURL = openAIBpsExcelURL
+			useBpsExcel = true
+			markOpenAIBpsExcelUsed(c)
+		} else {
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] bps excel rewrite failed, fallback to codex upstream (account: %s): %v", account.Name, rewriteErr)
+		}
+	}
+	if !useBpsExcel {
+		targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
+	}
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
@@ -1441,10 +1459,22 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// Set headers specific to OAuth accounts (ChatGPT internal API)
 	if account.UsesOpenAICodexProtocol() {
 		// Required: set Host for ChatGPT API (must use req.Host, not Header.Set)
-		req.Host = "chatgpt.com"
+		if useBpsExcel {
+			req.Host = openAIBpsExcelHost
+		} else {
+			req.Host = "chatgpt.com"
+		}
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
 		}
+	}
+
+	// bps 上游不使用 codex 客户端身份链（originator/version/turn-state/指纹收敛/
+	// session 隔离/容量投影/beta features）：这些头在 Basispoints 词汇表外，干净的
+	// 最小头集与官方 Excel 加载项一致。头部设置完后直接返回，跳过下方全部 codex 装饰。
+	if useBpsExcel {
+		applyOpenAIBpsExcelHeaders(req.Header, account, isStream)
+		return req, nil
 	}
 
 	// Whitelist passthrough headers

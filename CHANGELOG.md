@@ -1,3 +1,26 @@
+## [0.2.8-session-capacity-antistorm.15] - 2026-09-25
+### Features
+- 新增账号级「Basispoints（Excel）上游」开关（账号编辑面板，OpenAI OAuth/Setup-Token 账号）。开启后，符合条件的请求改道 `bps.openai.com/basispoints/api/responses`（官方 ChatGPT Excel 加载项端点），不符合的仍在本账号走 Codex 上游。2026-09-25 用生产 team 与 pro 号实测：现有 OAuth access_token 直接可用，`gpt-6-astra` 真实返回 astra，无 safety-buffering 响应头、无降级路由。
+- 改道按请求逐个判定资格：模型 ∈ {gpt-6-astra, gpt-5.6-sol/terra/luna}（含档位/日期后缀归一），未声明客户端 function/custom 工具，无图片输入，无结构化输出（text.format），无 service_tier；会话容量记账账号、spark 影子账号、compact 请求、WS 路径、API-Key 账号不参与改道。
+- bps 请求体按白名单重建：`model_selection:"explicit"`（防止上游对模型 slug 做默认路由）、`store:false`、顶层 `reasoning_effort`（codex 的 max/ultra 档收敛到 xhigh，none/未知收敛到 medium）、`context_management` 默认 200K 压缩阈值、`metadata` 派生 task_id/turn_id/agent_iteration（内容寻址，同对话多轮与重试保持稳定）、`prompt_cache_key` 透传；`tools` / `previous_response_id` / `reasoning` 对象 / `service_tier` 等一律不带。
+- 响应侧复用现有管道零改动：bps 总是返回 SSE（`stream:false` 也一样），非流式客户端由既有 `handleSSEToJSON` 折叠；usage 从 `response.completed` 正常提取计费；使用记录的 upstream_endpoint 标记为 `/basispoints/api/responses` 以区分真实出路。
+- 前端账号编辑弹窗新增开关（en/zh 文案）；调度投影白名单保留 `openai_bps_excel_enabled`，保存即热更新。
+
+### Design Rationale
+- 线路形状依据 ghcp_proxy（github.com/Nonary/ghcp_proxy）`excel_upstream.py` 与当天实测探针（research/bps-prism-probe）：`model_selection:"explicit"` 是关键字段；`tools`、`previous_response_id` 会被 422；`gpt-6-sol/luna` 在 bps 上 403 `basispoints_model_access_changed`。
+- 资格判定与改道放在 `buildUpstreamRequest`（responses / chat completions / messages 三条 OpenAI 路径的共同收口），一处改动覆盖三条路径；bps 请求跳过全部 codex 客户端身份链（originator / version / turn-state 门票 / 指纹收敛 / session 隔离 / 容量投影），与官方 Excel 加载项保持最小头集。
+- 客户端工具不做提示词仿真、也不做 run_officejs 中继：带工具的请求留在 codex 上游，避免改写流式响应引入脆弱性。这是 v1 的明确边界，后续可按需迭代。
+- 容量记账账号依赖 codex 上游的会话投影与回执做记账，bps 无法承载，直接排除而不是牺牲记账精度。
+- prism.openai.com 路线（chatgpt-prism2api）同期验证不可行：prism 不接受 chatgpt OAuth token 当凭据（要独立浏览器登录换 `prism_oai_access_token`），且协议是 start+轮询、无原生工具通道，不适合本网关。
+
+### Notes & Caveats
+- bps 每个请求自带约 22k token 的服务端系统前缀（Excel persona + 工具目录），绝大部分命中上游缓存；usage 与计费按上游实际回报计入，input 会比同请求在 codex 上游高（缓存部分按缓存价）。
+- bps 不使用 turn-state 门票：改道请求不注入、不采集；降智观察头（`X-Codex-Safety-Buffering-Faster-Model`）在 bps 上不存在，观察功能对其自然空转；降智阻断按响应模型判定，bps 实得模型与请求一致，不会误触发。
+- 「不会 429」是网友说法，未做负载验证；bps 用量大概率同样计入订阅配额。
+- `max_output_tokens` 等白名单外字段会被静默丢弃（不拦截、不报错），需要严格输出上限的请求不要走 bps 账号。
+- 生产池内 plus 号 token 全部过期 41 天且无 refresh_token，本次未能验证 plus 档；team（business_prolite）与 pro 档已验证。
+- 测试：新增 `openai_bps_excel_test.go`（开关解析、目录归一、effort 映射、资格判定、白名单重写、metadata 派生确定性、头部构造 7 个用例）；`go build ./...`、`go test ./internal/service/ ./internal/repository/` 通过；前端 vue-tsc 与 eslint 通过，vitest 333 个文件 2500 个用例全部通过。
+
 ## [0.2.8-session-capacity-antistorm.14] - 2026-09-24
 ### Features
 - 新增「降智观察」开关（网关服务 → Codex 设置），和「降智阻断」分开：开观察只记录不阻断；开阻断一定同时观察。保存后 5 秒内热生效。

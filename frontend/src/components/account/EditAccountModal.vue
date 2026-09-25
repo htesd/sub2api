@@ -2435,6 +2435,19 @@
         <CodexMigrationStatus :account="account" />
       </div>
 
+      <div
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && !isSparkShadow"
+        class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.bpsExcelUpstream') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.bpsExcelUpstreamDesc') }}</p>
+          </div>
+          <input v-model="bpsExcelUpstreamEnabled" type="checkbox" role="switch" :aria-label="t('admin.accounts.openai.bpsExcelUpstream')" data-testid="edit-bps-excel-upstream-toggle" class="h-5 w-5 shrink-0" />
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -3813,6 +3826,7 @@ type CodexTicketEnabledMode = 'inherit' | 'on' | 'off'
 const codexTicketEnabledMode = ref<CodexTicketEnabledMode>('inherit')
 const codexTicketActiveProbeEnabled = ref(false)
 const codexAutoMigrateEnabled = ref(false)
+const bpsExcelUpstreamEnabled = ref(false)
 
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full' | 'capacity'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
@@ -4332,6 +4346,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexTicketEnabledMode.value = 'inherit'
   codexTicketActiveProbeEnabled.value = false
   codexAutoMigrateEnabled.value = false
+  bpsExcelUpstreamEnabled.value = false
   codexFingerprintMode.value = 'off'
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
@@ -4390,6 +4405,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     codexTicketEnabledMode.value = resolveCodexTicketEnabledMode(extra?.codex_ticket_enabled)
     codexTicketActiveProbeEnabled.value = parseCodexTicketBool(extra?.codex_ticket_active_probe) === true
     codexAutoMigrateEnabled.value = extra?.codex_ticket_auto_migrate === true
+    bpsExcelUpstreamEnabled.value = extra?.openai_bps_excel_enabled === true
 
     if (newAccount.type === 'oauth') {
       const fpMode = extra?.codex_fingerprint_mode as string | undefined
@@ -5941,6 +5957,7 @@ const handleSubmit = async () => {
 
       if ((props.account.type === 'oauth' || props.account.type === 'setup-token') && !isSparkShadow.value) {
         newExtra.codex_ticket_auto_migrate = codexAutoMigrateEnabled.value
+        newExtra.openai_bps_excel_enabled = bpsExcelUpstreamEnabled.value
       }
 
       // 指纹收敛模式：默认 off（不写入）；device/session/full 是显式 opt-in，

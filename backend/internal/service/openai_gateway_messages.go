@@ -366,16 +366,19 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
+	// bps（Excel）上游不走 codex 会话/身份/门票装饰：以下补丁只在未改道 bps 时应用。
+	bpsExcelUsed := openAIBpsExcelUsed(c)
+
 	// Override session_id with a deterministic UUID derived from the isolated
 	// session key, ensuring different API keys produce different upstream sessions.
-	if account.Platform != PlatformGrok && promptCacheKey != "" {
+	if !bpsExcelUsed && account.Platform != PlatformGrok && promptCacheKey != "" {
 		isolatedSessionID := generateSessionUUID(isolateOpenAIUpstreamSessionID(apiKeyID, codexAccountIdentitySource(c, account), promptCacheKey))
 		upstreamReq.Header.Set("session_id", isolatedSessionID)
 		if upstreamReq.Header.Get("conversation_id") != "" {
 			upstreamReq.Header.Set("conversation_id", isolatedSessionID)
 		}
 	}
-	if account.UsesOpenAICodexProtocol() && account.Platform != PlatformGrok {
+	if !bpsExcelUsed && account.UsesOpenAICodexProtocol() && account.Platform != PlatformGrok {
 		// buildUpstreamRequest 保留 Messages bridge 的 body/session 兼容行为，并会先
 		// 清除身份头。真正发送前恢复完整 Codex 身份，避免 ChatGPT Codex 上游因缺失
 		// originator/OpenAI-Beta 返回 404（issue #3901）。
@@ -387,14 +390,16 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			zap.Bool("compat_identity_restored", true),
 		)
 	}
-	if account.UsesOpenAICodexProtocol() && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
+	if !bpsExcelUsed && account.UsesOpenAICodexProtocol() && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
 		upstreamReq.Header.Del("conversation_id")
 	}
-	if compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
+	if !bpsExcelUsed && compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
 		upstreamReq.Header.Set("x-codex-turn-state", compatTurnState)
 	}
-	if err := s.applyOpenAICodexTicket(ctx, account, upstreamModel, upstreamReq.Header); err != nil {
-		return nil, err
+	if !bpsExcelUsed {
+		if err := s.applyOpenAICodexTicket(ctx, account, upstreamModel, upstreamReq.Header); err != nil {
+			return nil, err
+		}
 	}
 
 	// 7. Send request

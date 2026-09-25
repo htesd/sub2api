@@ -726,6 +726,9 @@ export default {
         codexAutoMigrate: 'GPT-6 automatic proxy migration',
         codexAutoMigrateDesc: 'Requires a completed GPT-6/Astra response. If the current proxy fails, obtain and replay a ticket through a registered, same-region harvest-pool proxy, then switch the account proxy and ticket together. Off by default; changes apply without restart. Healthy routes are checked every 5 minutes; failures use existing backoff. Keeps existing business session masking.',
         codexAutoMigrateRequiresProbe: 'Requires account tickets, active probing, and the system background probing switch.',
+        bpsExcelUpstream: 'Basispoints (Excel) upstream',
+        bpsExcelUpstreamDesc:
+          'Route eligible requests to OpenAI\'s Basispoints backend (bps.openai.com, the official ChatGPT Excel add-in endpoint). Eligible means: model is gpt-6-astra / gpt-5.6-sol / terra / luna, no client-declared tools, no image input, no structured output, no service_tier, and no session-capacity accounting. Ineligible requests keep using the Codex upstream on this account. Basispoints does not use turn-state tickets and currently serves GPT-6 Astra without safety-buffering downgrades (verified 2026-09-25). Off by default.',
         codexMigrationRoute: 'Proxy {from} → {to}',
         codexMigrationResults: {
           current_proxy_ok_no_ticket: 'Current proxy returned GPT-6 without a usable ticket; keeping proxy and backing off',
