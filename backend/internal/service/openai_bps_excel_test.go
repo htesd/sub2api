@@ -97,6 +97,18 @@ func openAIBpsExcelQuote(s string) string {
 	return string(out)
 }
 
+func openAIBpsExcelResponsesContext() *gin.Context {
+	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	return c
+}
+
+func openAIBpsExcelMessagesContext() *gin.Context {
+	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	return c
+}
+
 func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	enabled := openAIBpsExcelTestAccount(map[string]any{OpenAIBpsExcelEnabledExtraKey: true})
 	disabled := openAIBpsExcelTestAccount(nil)
@@ -113,16 +125,31 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	// 模型目录外。
 	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-sol")))
 	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-5.5")))
-	// 客户端 function 工具 → codex 上游。
+	// 容量记账账号不再整体排除：bps 流量不产生 codex 会话，准入簿记保守成立。
+	capacityAccount := openAIBpsExcelTestAccount(map[string]any{
+		OpenAIBpsExcelEnabledExtraKey: true,
+		"codex_fingerprint_mode":      "capacity",
+	})
+	require.True(t, openAIBpsExcelRequestEligible(c, capacityAccount, openAIBpsExcelBody("gpt-6-astra")))
+	// 客户端 function/custom 工具：原生 responses 入站经 run_officejs 中继放行；
+	// 无入站请求信息或 messages 入站（转换层不认识信封）仍留 codex 上游。
+	responsesCtx := openAIBpsExcelResponsesContext()
+	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
+		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
+	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
+		`"tools":[{"type":"custom","name":"apply_patch"}]`)))
 	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
-		`"tools":[{"type":"custom","name":"apply_patch"}]`)))
+	require.False(t, openAIBpsExcelRequestEligible(openAIBpsExcelMessagesContext(), enabled, openAIBpsExcelBody("gpt-6-astra",
+		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
+	// tool_choice:"none" 视为无工具：无入站信息也可改道。
+	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+		`"tools":[{"type":"function","name":"exec_command","parameters":{}}],"tool_choice":"none"`)))
 	// 仅图像生成工具（分组桥接注入的形状）→ 仍可改道。
 	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation","action":"","model":""}]`)))
-	// 图像生成 + function 混合 → 不可改道。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	// 图像生成 + function 混合：responses 入站放行（function 走中继，图像工具不进目录）。
+	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation"},{"type":"function","name":"x"}]`)))
 	// 图片输入 → codex 上游。
 	require.False(t, openAIBpsExcelRequestEligible(c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
@@ -156,8 +183,10 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 			{"type":"function_call_output","call_id":"c1","output":"ok"}
 		]
 	}`)
-	rewritten, err := rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, specs, err := rewriteOpenAIBodyForBpsExcel(body)
 	require.NoError(t, err)
+	// image_generation 不是客户端 function/custom 工具，不进中继目录。
+	require.Empty(t, specs)
 
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rewritten, &out))
@@ -177,10 +206,21 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 		require.NotContains(t, out, dropped, "field %s must be dropped", dropped)
 	}
 
-	// input 原样保留。
+	// input = 序言（无客户端工具时的外部客户端提示）+ 翻译后的原历史。
 	input, ok := out["input"].([]any)
 	require.True(t, ok)
-	require.Len(t, input, 4)
+	require.Len(t, input, 5)
+	prologue, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "developer", prologue["role"])
+	prologueText := prologue["content"].([]any)[0].(map[string]any)["text"].(string)
+	require.Contains(t, prologueText, "external OpenAI Responses API client")
+	// 原历史里的 function_call_output 仍在，id 归一到 call_id 派生值。
+	tail, ok := input[4].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call_output", tail["type"])
+	require.Equal(t, "c1", tail["call_id"])
+	require.Equal(t, openAIBpsFunctionItemID("c1"), tail["id"])
 
 	// context_management 默认压缩阈值。
 	cm, ok := out["context_management"].([]any)
@@ -200,7 +240,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 	require.Len(t, turnID, 36)
 
 	// 确定性：同一请求体重写两次，派生标识逐字一致。
-	again, err := rewriteOpenAIBodyForBpsExcel(body)
+	again, _, err := rewriteOpenAIBodyForBpsExcel(body)
 	require.NoError(t, err)
 	var out2 map[string]any
 	require.NoError(t, json.Unmarshal(again, &out2))
@@ -215,7 +255,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 		"content": []any{map[string]any{"type": "input_text", "text": "next turn"}},
 	})
 	nextBody, _ := json.Marshal(decoded)
-	nextRewritten, err := rewriteOpenAIBodyForBpsExcel(nextBody)
+	nextRewritten, _, err := rewriteOpenAIBodyForBpsExcel(nextBody)
 	require.NoError(t, err)
 	var out3 map[string]any
 	require.NoError(t, json.Unmarshal(nextRewritten, &out3))
@@ -228,17 +268,23 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 func TestRewriteOpenAIBodyForBpsExcelEffortFallback(t *testing.T) {
 	// 顶层 reasoning_effort 兼容写法同样被认（antistorm.12 的 none 档口径）。
 	body := []byte(`{"model":"gpt-5.6-sol","reasoning_effort":"high","input":"ping"}`)
-	rewritten, err := rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, _, err := rewriteOpenAIBodyForBpsExcel(body)
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rewritten, &out))
 	require.Equal(t, "gpt-5.6-sol", out["model"])
 	require.Equal(t, "high", out["reasoning_effort"])
-	require.Equal(t, "ping", out["input"])
+	// 字符串输入包装成 user 消息条目，前面是外部客户端提示序言。
+	input, ok := out["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 2)
+	ping, ok := input[1].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", ping["role"])
 
 	// 无 effort 信息默认 medium。
 	body = []byte(`{"model":"gpt-5.6-terra","input":"ping"}`)
-	rewritten, err = rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, _, err = rewriteOpenAIBodyForBpsExcel(body)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(rewritten, &out))
 	require.Equal(t, "medium", out["reasoning_effort"])

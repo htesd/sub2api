@@ -20,13 +20,15 @@ import (
 // （research/bps-prism-probe，team 与 pro 号各一发）：同一套 ChatGPT OAuth access_token
 // + chatgpt-account-id 即可调通；gpt-6-astra 真实返回 astra，无 safety-buffering 响应头，
 // 无降级路由。本文件把该端点实现为账号级可选上游：开了开关的账号，兼容的请求改道 bps，
-// 不兼容的请求（声明了客户端工具、图片输入、结构化输出、service_tier、容量记账账号等）
-// 仍走原 codex 上游——资格判定是每个请求独立进行的，开关不是"全部流量"。
+// 不兼容的请求（图片输入、结构化输出、service_tier、compact、影子账号等）仍走原
+// codex 上游——资格判定是每个请求独立进行的，开关不是"全部流量"。
+// 客户端 function/custom 工具经 run_officejs 中继支持（openai_bps_excel_tools.go），
+// 仅原生 responses 入站挂拦截改写；其余入站路径的带工具请求仍回落 codex。
 //
 // 线路形状依据 ghcp_proxy（github.com/Nonary/ghcp_proxy）的 excel_upstream.py 与实测：
 // - model_selection:"explicit" 是关键字段，缺了上游会按默认路由处理模型 slug；
 // - 请求体只放行白名单字段：tools / previous_response_id / reasoning 对象 / service_tier
-//   等都会被上游 422 或 403，一律不带；
+//   等都会被上游 422 或 403，一律不带（tools 改经 developer 消息目录 + run_officejs 中继）；
 // - reasoning_effort 是顶层标量（low/medium/high/xhigh），codex 的 max/ultra 档在 bps
 //   不存在，收敛到 xhigh，none/未知收敛到 medium；
 // - 响应总是 SSE（即使 stream:false），非流式客户端由既有 handleSSEToJSON 折叠；
@@ -43,8 +45,10 @@ const (
 	OpenAIBpsExcelEnabledExtraKey = "openai_bps_excel_enabled"
 )
 
-// openAIBpsExcelUsedContextKey 记录当前转发尝试是否走了 bps 上游，
+// openAIBpsUsedContextKey 记录当前转发尝试是否走了 bps 上游，
 // 供结果落库（upstream_endpoint 标记）与各路径的"构建后补丁"判断跳过 codex 装饰。
+// 写入方是 buildUpstreamRequest 的 bps 挂点：每次构建显式覆盖（true/false），
+// 防止 failover 换号后沿用上一轮尝试的标记。
 const openAIBpsExcelUsedContextKey = "openai_bps_excel_used"
 
 // openAIBpsExcelModels 是 bps 目前实际服务的模型（2026-09-25 实测：
@@ -76,10 +80,38 @@ var openAIBpsExcelClientHeaders = map[string]string{
 	"x-stainless-runtime":                                 "browser:chrome",
 }
 
-func markOpenAIBpsExcelUsed(c *gin.Context) {
-	if c != nil {
-		c.Set(openAIBpsExcelUsedContextKey, true)
+// openAIBpsToolRelayContextKey 存放本次转发尝试的客户端工具目录（仅 responses 入站
+// 且声明了工具时有值）；响应侧的 run_officejs 拦截改写按它还原客户端调用。
+const openAIBpsToolRelayContextKey = "openai_bps_tool_relay"
+
+// openAIBpsToolRelayContext 是一次 bps 转发尝试的工具中继上下文。
+type openAIBpsToolRelayContext struct {
+	specs map[string]openAIBpsClientToolSpec
+}
+
+// setOpenAIBpsToolRelayContext 覆盖式写入工具目录：nil 表示本次尝试无中继，
+// 同时清掉上一轮尝试（bps 失败 failover 回 codex）遗留的目录，防止误拦截。
+func setOpenAIBpsToolRelayContext(c *gin.Context, specs map[string]openAIBpsClientToolSpec) {
+	if c == nil {
+		return
 	}
+	if len(specs) == 0 {
+		c.Set(openAIBpsToolRelayContextKey, nil)
+		return
+	}
+	c.Set(openAIBpsToolRelayContextKey, &openAIBpsToolRelayContext{specs: specs})
+}
+
+func openAIBpsToolRelayFromContext(c *gin.Context) *openAIBpsToolRelayContext {
+	if c == nil {
+		return nil
+	}
+	v, ok := c.Get(openAIBpsToolRelayContextKey)
+	if !ok {
+		return nil
+	}
+	relay, _ := v.(*openAIBpsToolRelayContext)
+	return relay
 }
 
 func openAIBpsExcelUsed(c *gin.Context) bool {
@@ -159,10 +191,6 @@ func openAIBpsExcelRequestEligible(c *gin.Context, account *Account, body []byte
 	if isOpenAIResponsesCompactPath(c) {
 		return false
 	}
-	// 容量记账账号依赖 codex 上游的会话投影与回执做记账，bps 无法承载。
-	if _, enabled := account.codexCapacityPolicy(); enabled {
-		return false
-	}
 	// spark 影子账号的语义跟随本体账号与专用查询通道，不改道。
 	if account.IsShadow() {
 		return false
@@ -174,10 +202,12 @@ func openAIBpsExcelRequestEligible(c *gin.Context, account *Account, body []byte
 	if openAIRequestBodyMayContainImageInput(body) {
 		return false
 	}
-	// 客户端声明的 function/custom 工具会被 bps 422（请求体没有 tools 词汇）。
-	// 唯一的例外是网关按分组配置注入的 image_generation 工具——它不构成客户端
-	// 工具语义，剥离后请求仍是纯文本对话，可以改道（白名单重写也不会带 tools）。
-	if openAIRequestBodyHasClientFunctionTools(body) {
+	// 客户端 function/custom 工具经 run_officejs 中继支持（见 openai_bps_excel_tools.go），
+	// 但拦截改写只挂在原生 responses 入站的响应处理上；messages / chat completions
+	// 入站的转换层不认识信封，带工具的请求在那些入站仍留在 codex 上游。
+	// tool_choice:"none" 与纯 image_generation 不产生中继目录，视为无工具。
+	var decodedForTools map[string]any
+	if err := json.Unmarshal(body, &decodedForTools); err == nil && len(openAIBpsClientToolSpecs(decodedForTools)) > 0 && !openAIBpsExcelToolRelayIngress(c) {
 		return false
 	}
 	// 结构化输出（text.format）与 service_tier 在 bps 词汇表外，静默丢弃会改变
@@ -192,31 +222,25 @@ func openAIBpsExcelRequestEligible(c *gin.Context, account *Account, body []byte
 	return true
 }
 
-// openAIRequestBodyHasClientFunctionTools 判断请求是否声明了图像生成以外的客户端工具。
-func openAIRequestBodyHasClientFunctionTools(body []byte) bool {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+// openAIBpsExcelToolRelayIngress 报告当前入站是否支持工具中继：只有原生
+// responses 入站（/v1/responses、/responses、/backend-api/codex/responses 等以
+// /responses 结尾的路径）的响应处理挂了 run_officejs 拦截改写。
+func openAIBpsExcelToolRelayIngress(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
-	hasClientTools := false
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		toolType := strings.TrimSpace(tool.Get("type").String())
-		if toolType != "" && toolType != "image_generation" {
-			hasClientTools = true
-			return false
-		}
-		return true
-	})
-	return hasClientTools
+	return strings.HasSuffix(c.Request.URL.Path, "/responses")
 }
 
 // rewriteOpenAIBodyForBpsExcel 把最终 codex 形状请求体重写为 bps 白名单形状。
-// 调用前提是 openAIBpsExcelRequestEligible 已通过。
-func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, error) {
+// 调用前提是 openAIBpsExcelRequestEligible 已通过。返回重写后的请求体与本次
+// 请求的客户端工具目录（无工具时为 nil，响应侧据此决定是否挂中继拦截）。
+func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, map[string]openAIBpsClientToolSpec, error) {
 	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		return nil, fmt.Errorf("decode request body for bps rewrite: %w", err)
+		return nil, nil, fmt.Errorf("decode request body for bps rewrite: %w", err)
 	}
+	specs := openAIBpsClientToolSpecs(decoded)
 
 	out := map[string]any{
 		"model":           openAIBpsExcelCanonicalModel(gjson.GetBytes(body, "model").String()),
@@ -227,10 +251,15 @@ func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, error) {
 	if stream, ok := decoded["stream"].(bool); ok {
 		out["stream"] = stream
 	}
-	input, hasInput := decoded["input"]
-	if hasInput {
-		out["input"] = input
+	// 历史条目先翻译（工具调用回放成 run_officejs 原生形状、剥掉客户端私有元数据、
+	// 滤掉裸 reasoning），再前置工具目录序言。客户端 tools 字段不上行——bps 没有
+	// tools 词汇，目录经 developer 消息注入。
+	translatedInput, _ := openAIBpsTranslateInputItems(decoded["input"])
+	prologue := []any{openAIBpsMessageItem("developer", openAIBpsCatalogInstructions(specs))}
+	if reminder := openAIBpsCatalogReminder(specs); reminder != "" {
+		prologue = append(prologue, openAIBpsMessageItem("developer", reminder))
 	}
+	out["input"] = append(prologue, translatedInput...)
 	if instructions, ok := decoded["instructions"].(string); ok && strings.TrimSpace(instructions) != "" {
 		out["instructions"] = instructions
 	}
@@ -261,9 +290,22 @@ func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, error) {
 		conversationKey = strings.TrimSpace(pck)
 		out["prompt_cache_key"] = conversationKey
 	}
+	if conversationKey == "" {
+		// 对话根指纹用翻译后的条目计算且在序言注入之前：Codex 每轮改写的私有
+		// 元数据已被翻译剥掉，序言则逐字节恒定；用原始条目会把每轮都认成新会话。
+		conversationKey = openAIBpsExcelConversationFingerprint(translatedInput)
+	}
+	// turn 指纹与 agent_iteration 仍按原始输入计算：翻译后的条目形状与客户端
+	// 语义回合不再一一对应，而 Excel 端语义是"同一条用户消息内的工具执行保持
+	// turn_id、只递增 agent_iteration"。
+	_, hasInput := decoded["input"]
 	out["metadata"] = deriveOpenAIBpsExcelMetadata(decoded, hasInput, conversationKey)
 
-	return json.Marshal(out)
+	rewritten, err := json.Marshal(out)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode bps request body: %w", err)
+	}
+	return rewritten, specs, nil
 }
 
 // deriveOpenAIBpsExcelMetadata 生成 bps 需要的任务/回合并发标识。

@@ -837,7 +837,7 @@ export default {
         codexAutoMigrateRequiresProbe: '需要同时启用本账号门票机制、主动打票及系统后台主动打票开关。',
         bpsExcelUpstream: 'Basispoints（Excel）上游',
         bpsExcelUpstreamDesc:
-          '把符合条件的请求改道到 OpenAI Basispoints 后端（bps.openai.com，官方 ChatGPT Excel 加载项端点）。条件：模型为 gpt-6-astra / gpt-5.6-sol / terra / luna，且未声明客户端工具、无图片输入、无结构化输出、无 service_tier、未开启会话容量记账。不符合的请求仍在本账号走 Codex 上游。该端点不使用 turn-state 门票，目前实测 GPT-6 Astra 不触发降智（2026-09-25 验证）。默认关闭。',
+          '把符合条件的请求改道到 OpenAI Basispoints 后端（bps.openai.com，官方 ChatGPT Excel 加载项端点）。条件：模型为 gpt-6-astra / gpt-5.6-sol / terra / luna，无图片输入、无结构化输出、无 service_tier。原生 Responses 入站的客户端 function/custom 工具经服务端 run_officejs 传输中继（2026-09-26 端到端实测通过）；其他入站路径的带工具请求仍在本账号走 Codex 上游。该端点不使用 turn-state 门票，目前实测 GPT-6 Astra 不触发降智（2026-09-25 验证）。默认关闭，保存后热生效。',
         codexMigrationRoute: '代理 {from} → {to}',
         codexMigrationResults: {
           current_proxy_ok_no_ticket: '当前代理已返回 GPT-6，但未取得合格新票；保留出口并退避补票',

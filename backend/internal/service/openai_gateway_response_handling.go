@@ -53,6 +53,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
 	}
+	// bps 工具中继：仅当本次转发尝试确实走了 bps 且请求声明了客户端工具时挂载；
+	// 拦截器吞掉 run_officejs 原生调用的事件流，改发客户端形状的函数调用事件。
+	var bpsRelay *openAIBpsToolStreamRelay
+	if openAIBpsExcelUsed(c) {
+		if relayCtx := openAIBpsToolRelayFromContext(c); relayCtx != nil {
+			bpsRelay = newOpenAIBpsToolStreamRelay(relayCtx.specs)
+		}
+	}
 	// 降智阻断策略在进入流处理前取一次，避免每个 SSE 帧都读设置缓存。
 	downgradePolicy := s.openAICodexDowngradePolicy(ctx)
 	downgradeChecked := false
@@ -476,8 +484,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		sendErrorEvent(code, message)
 		return resultWithUsage(), fmt.Errorf("stream read error: %w", scanErr), true
 	}
-	processSSELine := func(line string, queueDrained bool) {
+	var processSSELine func(line string, queueDrained bool)
+	processSSELine = func(line string, queueDrained bool) {
 		if streamEarlyErr != nil {
+			return
+		}
+		// bps 工具中继前置钩子：受管事件族的 event: 行暂存、被吞条目的 data 行
+		// 吞掉或改写后回流。钩子返回 true 表示该行已被处置。
+		if bpsRelay != nil && bpsRelay.hookLine(line, func(emit string) { processSSELine(emit, queueDrained) }) {
 			return
 		}
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
@@ -1767,6 +1781,13 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
 		body = finalResponse
+		// bps 工具中继：折叠后的响应里仍是 run_officejs 原生调用，还原成客户端
+		// 工具调用再下发（同时把原生条目写入回放缓存，供下一轮历史逐字节回放）。
+		if relayCtx := openAIBpsToolRelayFromContext(c); relayCtx != nil && openAIBpsExcelUsed(c) {
+			if rewritten, changed := openAIBpsRewriteCompletedToolCalls(body, relayCtx.specs, nil); changed {
+				body = rewritten
+			}
+		}
 		if originalModel != mappedModel {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 		}

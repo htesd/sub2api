@@ -1415,22 +1415,29 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		targetURL = openaiPlatformAPIURL
 	}
 
-	// 账号级 Basispoints（Excel）上游选项：资格判定按请求进行（模型目录、客户端
-	// 工具、图片输入、结构化输出、service_tier、容量记账等任一不满足即留在 codex
-	// 上游），命中后请求体重写为 bps 白名单形状。重写失败只记日志并回落 codex 上游，
-	// 不让可转发的请求因为改道失败而报错。
+	// 账号级 Basispoints（Excel）上游选项：资格判定按请求进行（模型目录、图片输入、
+	// 结构化输出、service_tier、compact、影子账号等任一不满足即留在 codex 上游；
+	// 客户端工具在原生 responses 入站经 run_officejs 中继支持），命中后请求体重写
+	// 为 bps 白名单形状。重写失败只记日志并回落 codex 上游，不让可转发的请求因为
+	// 改道失败而报错。
 	useBpsExcel := false
 	if openAIBpsExcelRequestEligible(c, account, body) {
-		if rewritten, rewriteErr := rewriteOpenAIBodyForBpsExcel(body); rewriteErr == nil {
+		if rewritten, specs, rewriteErr := rewriteOpenAIBodyForBpsExcel(body); rewriteErr == nil {
 			body = rewritten
 			targetURL = openAIBpsExcelURL
 			useBpsExcel = true
-			markOpenAIBpsExcelUsed(c)
+			setOpenAIBpsToolRelayContext(c, specs)
 		} else {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] bps excel rewrite failed, fallback to codex upstream (account: %s): %v", account.Name, rewriteErr)
 		}
 	}
+	// 显式覆盖本尝试的标记与工具目录：同一 gin context 在 failover 换号后会再次
+	// 走到这里，旧尝试的 bps 标记/目录不能带进 codex 路径的响应处理。
+	if c != nil {
+		c.Set(openAIBpsExcelUsedContextKey, useBpsExcel)
+	}
 	if !useBpsExcel {
+		setOpenAIBpsToolRelayContext(c, nil)
 		targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 	}
 

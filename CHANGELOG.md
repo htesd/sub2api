@@ -1,3 +1,25 @@
+## [0.2.8-session-capacity-antistorm.16] - 2026-09-26
+### Features
+- Basispoints（Excel）上游支持客户端工具：声明了 function/custom 工具的请求（原生 Responses 入站）不再回落 codex，改经 bps 服务端原生 `run_officejs` 工具中继——请求侧把工具目录与传输协议注入 developer 消息（置于对话历史之前，保住上游 prompt cache 前缀），模型要调客户端工具时发起 `run_officejs` 调用（`code` 字段为 `{"name":...,"arguments":...}` 信封），响应侧拦截还原成客户端 `function_call`/`custom_tool_call` 下发。Codex 动态工具命名空间（`type:"namespace"`）递归展开进目录。
+- 流式拦截：在 SSE 管道前置钩子吞掉受管条目的事件流（`output_item.added`/`function_call_arguments.*`/`output_item.done`），到 `output_item.done` 拿完整原生条目提取信封后，按客户端形状合成 added → arguments.done → item.done 三段事件（含空行事件边界）回流正常管道；`response.completed` 内嵌的 output 数组同步改写。提取失败（信封畸形/名字不在目录/参数违反目录 schema）按原生形状补发——客户端回 "unsupported call: run_officejs" 后，下一轮请求侧将其改写为协议重试指引，模型自愈。
+- 非流式路径在 `handleSSEToJSON` 折叠后直接改写 completed 载荷。
+- 历史回放：客户端回传的工具调用/结果翻译回 run_officejs 原生形状；命中进程内原生调用缓存（512 条 LRU，按 call_id）时逐字节回放（保住服务端条目身份，加密思维链才能关联工具结果），未命中按信封重合成；`update_plan` 双向 schema 适配（bps 原生 `{id,description,status,result}` ↔ Codex `{step,status}`）；空工具结果显式占位 "(tool call succeeded with no output)"；裸 reasoning 条目按 `store:false` 语义丢弃，带 encrypted_content 的保留。
+- 资格判定调整：容量记账账号不再整体排除（bps 流量不产生 codex 会话，准入簿记保守成立）；`tool_choice:"none"` 视为无工具可直接改道；messages / chat completions 入站的带工具请求仍留 codex（其响应转换层不认识中继信封）。
+
+### Bug Fixes
+- 同一 gin context 在 failover 换号后可能沿用上一轮尝试的 bps 标记与工具目录；现在 `buildUpstreamRequest` 每次构建都显式覆盖两者。
+- 无 `prompt_cache_key` 时对话根指纹改用翻译后的输入条目计算（Codex 每轮改写的私有元数据已被翻译剥掉），避免同一对话每轮被认成新会话。
+
+### Design Rationale
+- 中继机制逐句移植自 ghcp_proxy `excel_upstream.py`（目录提示词、缓存前缀内提醒、信封解码含非法反斜杠修复与最多两层嵌套解包、目录 schema 校验、update_plan 适配、输出归一化），并在 2026-09-26 用生产 team 号对真实 bps 端点验证两轮工具循环（`research/bps-prism-probe/probe3.py`）：模型发起 run_officejs 调用且信封可解，同 turn_id + agent_iteration 递增回放工具结果后模型直接续答不重新规划。
+- 与 ghcp 的一处有意偏差：提取按条目独立进行（天然支持并行工具调用），不做 ghcp「恰好一个原生调用才提取」的整体门槛。
+
+### Notes & Caveats
+- bps 响应的 `instructions` 字段回显服务端 Excel 系统提示（含 run_officejs 等原生工具描述），目前原样透传；Codex 客户端不读该字段，无功能影响。
+- 容量记账账号开 bps 后，改道流量不产生 codex 回执：codex 5h/7d 用量百分比可能低估这部分消耗，超额发现依赖上游 429 兜底而非百分比预停。
+- e2e 验证（本地网关 + 生产 team 号 14656，capacity 指纹模式）：流式工具调用在客户端侧还原为 `get_weather`（无任何 run_officejs 泄漏），回放工具结果后模型消费结果正常续答，非流式折叠路径同样还原；`usage_logs.upstream_endpoint=/basispoints/api/responses`，计费正常。
+- 测试：`openai_bps_excel_test.go` 适配新资格语义；新增 `openai_bps_excel_tools_test.go`（目录/信封解码/反斜杠修复/schema 校验/提取/历史翻译/输出归一/completed 改写）与 `openai_bps_excel_stream_test.go`（拦截改写/消息与目录外工具直通/畸形信封原生补发/custom 工具）；`go test ./internal/service ./internal/repository ./internal/handler/...` 全部通过。
+
 ## [0.2.8-session-capacity-antistorm.15] - 2026-09-25
 ### Features
 - 新增账号级「Basispoints（Excel）上游」开关（账号编辑面板，OpenAI OAuth/Setup-Token 账号）。开启后，符合条件的请求改道 `bps.openai.com/basispoints/api/responses`（官方 ChatGPT Excel 加载项端点），不符合的仍在本账号走 Codex 上游。2026-09-25 用生产 team 与 pro 号实测：现有 OAuth access_token 直接可用，`gpt-6-astra` 真实返回 astra，无 safety-buffering 响应头、无降级路由。
