@@ -51,10 +51,14 @@ const (
 // 防止 failover 换号后沿用上一轮尝试的标记。
 const openAIBpsExcelUsedContextKey = "openai_bps_excel_used"
 
-// openAIBpsExcelModels 是 bps 目前实际服务的模型（2026-09-25 实测：
-// gpt-6-sol / gpt-6-luna 在 bps 上 403 basispoints_model_access_changed）。
+// openAIBpsExcelModels 是 bps 目前实际服务的模型。目录会变：gpt-6-sol / gpt-6-luna
+// 在 2026-09-25 实测 403 basispoints_model_access_changed，2026-09-26 复测已开放
+// 且实得模型与请求一致（probe4.py）。若上游再次收走，bps 会回 403，按普通上游
+// 错误进入换号逻辑。
 var openAIBpsExcelModels = map[string]bool{
 	"gpt-6-astra":   true,
+	"gpt-6-sol":     true,
+	"gpt-6-luna":    true,
 	"gpt-5.6-sol":   true,
 	"gpt-5.6-terra": true,
 	"gpt-5.6-luna":  true,

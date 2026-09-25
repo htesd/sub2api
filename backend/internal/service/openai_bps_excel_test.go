@@ -50,10 +50,12 @@ func TestOpenAIBpsExcelCanonicalModel(t *testing.T) {
 		{"gpt-5.6-sol-high", "gpt-5.6-sol"},
 		{"gpt-5.6-terra", "gpt-5.6-terra"},
 		{"gpt-5.6-luna", "gpt-5.6-luna"},
-		// 不在 bps 目录：gpt-6-sol/luna 在 bps 上 403（2026-09-25 实测）。
-		{"gpt-6-sol", ""},
-		{"gpt-6-luna", ""},
-		{"gpt-6-sol-high", ""},
+		// gpt-6-sol/luna 于 2026-09-26 在 bps 开放（前一天还是 403）。
+		{"gpt-6-sol", "gpt-6-sol"},
+		{"gpt-6-sol-high", "gpt-6-sol"},
+		{"gpt-6-luna", "gpt-6-luna"},
+		{"gpt-6-luna-xhigh", "gpt-6-luna"},
+		// 不在 bps 目录。
 		{"gpt-6-nova", ""},
 		{"gpt-5.5", ""},
 		{"gpt-5.4", ""},
@@ -123,8 +125,11 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	apiKeyAccount.Type = AccountTypeAPIKey
 	require.False(t, openAIBpsExcelRequestEligible(c, apiKeyAccount, openAIBpsExcelBody("gpt-6-astra")))
 	// 模型目录外。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-sol")))
+	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-nova")))
 	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-5.5")))
+	// gpt-6-sol/luna 已在 bps 目录（2026-09-26 复测开放）。
+	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-sol")))
+	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-luna")))
 	// 容量记账账号不再整体排除：bps 流量不产生 codex 会话，准入簿记保守成立。
 	capacityAccount := openAIBpsExcelTestAccount(map[string]any{
 		OpenAIBpsExcelEnabledExtraKey: true,
@@ -364,8 +369,8 @@ func TestBuildUpstreamRequestBpsExcelIneligible(t *testing.T) {
 		Type:     AccountTypeOAuth,
 		Extra:    map[string]any{OpenAIBpsExcelEnabledExtraKey: true},
 	}
-	// gpt-6-sol 不在 bps 目录内 → 资格不通过（codex 路径的后续装饰需要完整服务
+	// gpt-6-nova 不在 bps 目录内 → 资格不通过（codex 路径的后续装饰需要完整服务
 	// 依赖，这里只验证资格判定本身，不调用 buildUpstreamRequest 走到底）。
-	require.False(t, openAIBpsExcelRequestEligible(nil, account, []byte(`{"model":"gpt-6-sol","input":"ping"}`)))
+	require.False(t, openAIBpsExcelRequestEligible(nil, account, []byte(`{"model":"gpt-6-nova","input":"ping"}`)))
 	require.False(t, openAIBpsExcelRequestEligible(nil, account, []byte(`{"model":"gpt-6-astra","tools":[{"type":"function","name":"x"}],"input":"ping"}`)))
 }

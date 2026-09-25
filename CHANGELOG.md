@@ -1,3 +1,10 @@
+## [0.2.8-session-capacity-antistorm.17] - 2026-09-26
+### Features
+- bps 改道目录扩容：`gpt-6-sol` / `gpt-6-luna` 加入（2026-09-26 复测，bps 已开放且实得模型与请求一致；前一天还是 403 `basispoints_model_access_changed`）。至此目录为 gpt-6-astra / gpt-6-sol / gpt-6-luna / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna。
+
+### Notes & Caveats
+- bps 模型目录会漂移（拒绝文案原文即 "Model access has changed. Available models will update automatically"）。若上游再次收走某模型，开了 bps 的账号上该模型的请求会吃到 403 并进入换号逻辑；要根治需另做「该错误码同号回落 codex」的重试，暂未实现。
+
 ## [0.2.8-session-capacity-antistorm.16] - 2026-09-26
 ### Features
 - Basispoints（Excel）上游支持客户端工具：声明了 function/custom 工具的请求（原生 Responses 入站）不再回落 codex，改经 bps 服务端原生 `run_officejs` 工具中继——请求侧把工具目录与传输协议注入 developer 消息（置于对话历史之前，保住上游 prompt cache 前缀），模型要调客户端工具时发起 `run_officejs` 调用（`code` 字段为 `{"name":...,"arguments":...}` 信封），响应侧拦截还原成客户端 `function_call`/`custom_tool_call` 下发。Codex 动态工具命名空间（`type:"namespace"`）递归展开进目录。
