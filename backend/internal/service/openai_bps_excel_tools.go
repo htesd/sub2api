@@ -50,7 +50,8 @@ const (
 		"Retry once with exactly one outer run_officejs call. Its code field is JSON text, not " +
 		"JavaScript or OfficeJS, and must contain one catalog-tool object; do not put another " +
 		"run_officejs wrapper inside it. Serialize the inner JSON before placing it in code, " +
-		"including any backslashes or quotes in shell commands, and do not repeat the identical payload."
+		"including any backslashes or quotes in shell commands. Inside JSON string values use " +
+		"escape sequences (\\n, \\t), never literal newlines or tabs, and do not repeat the identical payload."
 )
 
 // openAIBpsToolTransportAliases 是传输工具的全部可见名（functions. 前缀只是宿主显示语法）。
@@ -256,9 +257,13 @@ func openAIBpsCatalogReminder(specs map[string]openAIBpsClientToolSpec) string {
 	return reminder
 }
 
-// openAIBpsRepairInvalidJSONBackslashes 把 JSON 字符串值里的非法反斜杠转义双写
-// （例如 shell 正则里的 \( ），保留命令原义而不把文本当代码求值。
-func openAIBpsRepairInvalidJSONBackslashes(text string) string {
+// openAIBpsRepairJSONStringLoose 宽松修复 JSON 文本，只动字符串值内部、不把文本
+// 当代码求值：
+//   - 非法反斜杠转义双写（例如 shell 正则里的 \( ），保留命令原义；
+//   - 裸控制字符转成合法转义（\n/\r/\t/\u00XX）——多行 PowerShell/shell 脚本
+//     常以字面换行出现在 code 字符串里，标准解析器直接拒收（2026-09-26 生产
+//     故障的主因之一）。
+func openAIBpsRepairJSONStringLoose(text string) string {
 	var b strings.Builder
 	b.Grow(len(text) + 8)
 	inString := false
@@ -274,6 +279,19 @@ func openAIBpsRepairInvalidJSONBackslashes(text string) string {
 		if ch == '"' {
 			b.WriteByte(ch)
 			inString = false
+			continue
+		}
+		if ch < 0x20 {
+			switch ch {
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				fmt.Fprintf(&b, `\u%04x`, ch)
+			}
 			continue
 		}
 		if ch != '\\' {
@@ -313,8 +331,26 @@ func isHex4(s string) bool {
 	return true
 }
 
+// openAIBpsParseJSONObjectLoose 解析 JSON 对象文本，失败时经宽松修复重试一次。
+// 模型产出的 arguments/code 文本不属于合法 JSON 是常态（裸换行、非法反斜杠），
+// 上游 ghcp 只修反斜杠，控制字符修复是 2026-09-26 生产故障后加的增强。
+func openAIBpsParseJSONObjectLoose(raw string) map[string]any {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && parsed != nil {
+		return parsed
+	}
+	repaired := openAIBpsRepairJSONStringLoose(raw)
+	if repaired == raw {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(repaired), &parsed); err == nil {
+		return parsed
+	}
+	return nil
+}
+
 // openAIBpsDecodeTransportCode 解 run_officejs 的 code 字段：直接是对象、JSON 文本、
-// 修复反斜杠后的 JSON 文本，或包在代码围栏/赋值语句里的第一个完整 JSON 对象。
+// 宽松修复后的 JSON 文本，或包在代码围栏/赋值语句里的第一个完整 JSON 对象。
 func openAIBpsDecodeTransportCode(code any) map[string]any {
 	if obj, ok := code.(map[string]any); ok {
 		return obj
@@ -324,7 +360,7 @@ func openAIBpsDecodeTransportCode(code any) map[string]any {
 		return nil
 	}
 	candidates := []string{text}
-	if repaired := openAIBpsRepairInvalidJSONBackslashes(text); repaired != text {
+	if repaired := openAIBpsRepairJSONStringLoose(text); repaired != text {
 		candidates = append(candidates, repaired)
 	}
 	for _, candidate := range candidates {
@@ -351,8 +387,13 @@ func openAIBpsIsTransportName(name any) bool {
 	return ok && openAIBpsToolTransportAliases[s]
 }
 
+// openAIBpsTransportMaxUnwrap 是信封套娃的最大拆解层数（ghcp 只拆 2 层；生产
+// 出现过 run_officejs→run_officejs→…→exec 的三层形态，放宽到 4）。
+const openAIBpsTransportMaxUnwrap = 4
+
 // openAIBpsTransportEnvelope 从 run_officejs 原生调用里解出客户端工具信封；
-// 最多解两层嵌套（模型偶尔再套一层），解出来还是传输名则判失败。
+// 最多拆 openAIBpsTransportMaxUnwrap 层嵌套（模型偶尔再套几层），解出来还是
+// 传输名则判失败。外层 arguments 与每层的 code 都走宽松解析。
 func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 	if native == nil {
 		return nil
@@ -364,23 +405,21 @@ func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 	if !ok {
 		return nil
 	}
-	var arguments map[string]any
-	if err := json.Unmarshal([]byte(rawArguments), &arguments); err != nil || arguments == nil {
+	arguments := openAIBpsParseJSONObjectLoose(rawArguments)
+	if arguments == nil {
 		return nil
 	}
 	envelope := openAIBpsDecodeTransportCode(arguments["code"])
-	for i := 0; i < 2; i++ {
+	for i := 0; i < openAIBpsTransportMaxUnwrap; i++ {
 		if envelope == nil || !openAIBpsIsTransportName(envelope["name"]) {
 			break
 		}
-		nestedArguments, ok := envelope["arguments"].(map[string]any)
-		if !ok {
-			if raw, isString := envelope["arguments"].(string); isString {
-				var parsed map[string]any
-				if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
-					nestedArguments = parsed
-				}
-			}
+		var nestedArguments map[string]any
+		switch raw := envelope["arguments"].(type) {
+		case map[string]any:
+			nestedArguments = raw
+		case string:
+			nestedArguments = openAIBpsParseJSONObjectLoose(raw)
 		}
 		if nestedArguments == nil {
 			return nil
@@ -676,20 +715,55 @@ func openAIBpsFunctionItemID(callID string) string {
 	return "fc_" + sum[:32]
 }
 
+// openAIBpsResolveClientToolSpec 把信封里的工具名解析成目录条目：剥 functions.
+// 宿主显示前缀、目录键直查、裸名唯一匹配（模型常对命名空间工具只发裸名；
+// 裸名命中多个条目属歧义，不猜）。
+func openAIBpsResolveClientToolSpec(name string, specs map[string]openAIBpsClientToolSpec) (openAIBpsClientToolSpec, bool) {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "functions.")
+	if spec, ok := specs[name]; ok {
+		return spec, true
+	}
+	if name == "" || strings.Contains(name, ".") {
+		return openAIBpsClientToolSpec{}, false
+	}
+	var matched openAIBpsClientToolSpec
+	found := false
+	for _, spec := range specs {
+		if spec.Name != name {
+			continue
+		}
+		if found {
+			return openAIBpsClientToolSpec{}, false
+		}
+		matched = spec
+		found = true
+	}
+	return matched, found
+}
+
 // openAIBpsExtractNativeToolCall 把一个原生 function_call/custom_tool_call 条目还原成
 // 客户端工具调用。返回 false 表示该条目不该透出为客户端调用（信封畸形、名字不在目录、
 // 参数不符合目录 schema 等），调用方应原样放行原生条目。
 func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]openAIBpsClientToolSpec) (map[string]any, bool) {
+	extracted, reason := openAIBpsExtractNativeToolCallReason(native, specs)
+	return extracted, reason == ""
+}
+
+// openAIBpsExtractNativeToolCallReason 同 openAIBpsExtractNativeToolCall，失败时
+// 附带机读原因码：流式拦截器据此记日志，生产排障不再靠猜（此前提取失败全程静默，
+// 只能在客户端看到 "unsupported call: run_officejs" 后反推）。
+func openAIBpsExtractNativeToolCallReason(native map[string]any, specs map[string]openAIBpsClientToolSpec) (map[string]any, string) {
 	if len(specs) == 0 || native == nil {
-		return nil, false
+		return nil, "no_catalog"
 	}
 	nativeType, _ := native["type"].(string)
 	if nativeType != "function_call" && nativeType != "custom_tool_call" {
-		return nil, false
+		return nil, "not_a_tool_call"
 	}
 	envelope := openAIBpsTransportEnvelope(native)
 	if openAIBpsIsTransportName(native["name"]) && envelope == nil {
-		return nil, false
+		return nil, "envelope_decode_failed"
 	}
 	name := ""
 	if envelope != nil {
@@ -697,9 +771,9 @@ func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]open
 	} else {
 		name, _ = native["name"].(string)
 	}
-	spec, ok := specs[name]
+	spec, ok := openAIBpsResolveClientToolSpec(name, specs)
 	if !ok {
-		return nil, false
+		return nil, "tool_not_in_catalog"
 	}
 	callID, _ := native["call_id"].(string)
 	if callID == "" {
@@ -715,34 +789,32 @@ func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]open
 			case map[string]any:
 				arguments = raw
 			case string:
-				var parsed map[string]any
-				if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-					return nil, false
+				arguments = openAIBpsParseJSONObjectLoose(raw)
+				if arguments == nil {
+					return nil, "envelope_arguments_parse_failed"
 				}
-				arguments = parsed
 			}
 		} else {
 			if nativeType != "function_call" {
-				return nil, false
+				return nil, "unexpected_native_type"
 			}
 			raw, _ := native["arguments"].(string)
-			var parsed map[string]any
-			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-				return nil, false
+			arguments = openAIBpsParseJSONObjectLoose(raw)
+			if arguments == nil {
+				return nil, "native_arguments_parse_failed"
 			}
-			arguments = parsed
 			arguments = openAIBpsNormalizeNativePlanArgumentsFor(spec.Key, arguments)
 		}
 		if arguments == nil {
-			return nil, false
+			return nil, "arguments_missing"
 		}
 		inputSchema := openAIBpsToolInputSchema(spec)
 		if !openAIBpsValueMatchesSchema(arguments, inputSchema) {
-			return nil, false
+			return nil, "schema_mismatch"
 		}
 		rawArguments, err := json.Marshal(arguments)
 		if err != nil {
-			return nil, false
+			return nil, "arguments_marshal_failed"
 		}
 		itemID := nativeItemID
 		if itemID == "" {
@@ -758,7 +830,7 @@ func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]open
 		if spec.Namespace != "" {
 			result["namespace"] = spec.Namespace
 		}
-		return result, true
+		return result, ""
 	}
 
 	// custom 工具：信封或原生 custom_tool_call 的 input 必须是字符串。
@@ -767,13 +839,13 @@ func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]open
 		customInput = envelope["input"]
 	} else {
 		if nativeType != "custom_tool_call" {
-			return nil, false
+			return nil, "unexpected_native_type"
 		}
 		customInput = native["input"]
 	}
 	inputText, ok := customInput.(string)
 	if !ok {
-		return nil, false
+		return nil, "custom_input_not_string"
 	}
 	itemID := ""
 	if envelope == nil && nativeItemID != "" {
@@ -787,7 +859,7 @@ func openAIBpsExtractNativeToolCall(native map[string]any, specs map[string]open
 		"call_id": callID,
 		"name":    spec.Key,
 		"input":   inputText,
-	}, true
+	}, ""
 }
 
 // openAIBpsNormalizeNativePlanArgumentsFor 只对 update_plan 做原生→客户端参数归一。

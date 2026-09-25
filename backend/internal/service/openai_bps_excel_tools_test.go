@@ -68,12 +68,19 @@ func TestOpenAIBpsCatalogInstructionsAndReminder(t *testing.T) {
 	require.Empty(t, openAIBpsCatalogReminder(nil))
 }
 
-func TestOpenAIBpsRepairInvalidJSONBackslashes(t *testing.T) {
+func TestOpenAIBpsRepairJSONStringLoose(t *testing.T) {
 	// 非法转义的反斜杠被双写（修复后 JSON 可解析且内容保真）。
-	require.Equal(t, `{"cmd":"ls \\( -name x"}`, openAIBpsRepairInvalidJSONBackslashes(`{"cmd":"ls \( -name x"}`))
+	require.Equal(t, `{"cmd":"ls \\( -name x"}`, openAIBpsRepairJSONStringLoose(`{"cmd":"ls \( -name x"}`))
 	// 合法转义不动。
-	require.Equal(t, `{"a":"b\nC:\"}`, openAIBpsRepairInvalidJSONBackslashes(`{"a":"b\nC:\"}`))
-	require.Equal(t, `{"a":"A"}`, openAIBpsRepairInvalidJSONBackslashes(`{"a":"A"}`))
+	require.Equal(t, `{"a":"b\nC:\"}`, openAIBpsRepairJSONStringLoose(`{"a":"b\nC:\"}`))
+	require.Equal(t, `{"a":"A"}`, openAIBpsRepairJSONStringLoose(`{"a":"A"}`))
+	// 字符串值里的裸控制字符转义（多行脚本的字面换行）；字符串外的换行不动。
+	raw := "{\"cmd\":\"line1\nline2\tend\"}\n"
+	repaired := openAIBpsRepairJSONStringLoose(raw)
+	require.Equal(t, `{"cmd":"line1\nline2\tend"}`+"\n", repaired)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal([]byte(repaired), &decoded))
+	require.Equal(t, "line1\nline2\tend", decoded["cmd"])
 }
 
 func TestOpenAIBpsDecodeTransportCode(t *testing.T) {
@@ -355,4 +362,59 @@ func TestOpenAIBpsRewriteCompletedToolCalls(t *testing.T) {
 	require.False(t, changed)
 	_, changed = openAIBpsRewriteCompletedToolCalls(raw, nil, nil)
 	require.False(t, changed)
+}
+
+// --- antistorm.18 生产故障复现（2026-09-26 用户报告：信封畸形重试死循环）---
+
+func TestOpenAIBpsTransportEnvelopeLiteralNewline(t *testing.T) {
+	// 模型的 code 字符串里带字面换行（多行 PowerShell 脚本的真实形态）：
+	// 外层 arguments 是合法 JSON，内层 code 文本含裸 \n → 修复后必须解出。
+	inner := "{\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"line1\nline2\"}}"
+	args, _ := json.Marshal(map[string]any{"summary": "s", "code": inner})
+	native := map[string]any{
+		"type": "function_call", "id": "fc_nl", "call_id": "call_nl",
+		"name": "run_officejs", "arguments": string(args),
+	}
+	envelope := openAIBpsTransportEnvelope(native)
+	require.NotNil(t, envelope)
+	require.Equal(t, "exec_command", envelope["name"])
+	require.Equal(t, "line1\nline2", envelope["arguments"].(map[string]any)["cmd"])
+
+	// 外层 arguments 本身就带字面换行（模型在 code 值里直接换行）。
+	rawOuter := "{\"summary\":\"s\",\"code\":\"{\\\"name\\\":\\\"exec_command\\\",\\\"arguments\\\":{\\\"cmd\\\":\\\"pwd\\\"}}\n\"}"
+	native2 := map[string]any{
+		"type": "function_call", "id": "fc_nl2", "call_id": "call_nl2",
+		"name": "run_officejs", "arguments": rawOuter,
+	}
+	envelope2 := openAIBpsTransportEnvelope(native2)
+	require.NotNil(t, envelope2)
+	require.Equal(t, "exec_command", envelope2["name"])
+}
+
+func TestOpenAIBpsTransportEnvelopeDeepNesting(t *testing.T) {
+	// 三层套娃（生产报告的 run_officejs→run_officejs→…→exec 形态加深版）。
+	l0 := `{"name":"exec_command","arguments":{"cmd":"ls"}}`
+	l1raw, _ := json.Marshal(map[string]any{"name": "run_officejs", "arguments": map[string]any{"code": l0}})
+	l2raw, _ := json.Marshal(map[string]any{"name": "run_officejs", "arguments": map[string]any{"code": string(l1raw)}})
+	l3raw, _ := json.Marshal(map[string]any{"name": "run_officejs", "arguments": map[string]any{"code": string(l2raw)}})
+	native := openAIBpsNativeTransportCall(string(l3raw))
+	envelope := openAIBpsTransportEnvelope(native)
+	require.NotNil(t, envelope)
+	require.Equal(t, "exec_command", envelope["name"])
+}
+
+func TestOpenAIBpsExtractBareAndPrefixedNames(t *testing.T) {
+	specs := openAIBpsTestSpecs()
+	// 模型对命名空间工具只发裸名（目录键是 mcp.search）→ 唯一匹配时应还原。
+	bare := openAIBpsNativeTransportCall(`{"name":"search","arguments":{}}`)
+	extracted, ok := openAIBpsExtractNativeToolCall(bare, specs)
+	require.True(t, ok)
+	require.Equal(t, "search", extracted["name"])
+	require.Equal(t, "mcp", extracted["namespace"])
+
+	// 模型把宿主显示前缀写进内层名 → 剥掉前缀后匹配。
+	prefixed := openAIBpsNativeTransportCall(`{"name":"functions.exec_command","arguments":{"cmd":"pwd"}}`)
+	extracted, ok = openAIBpsExtractNativeToolCall(prefixed, specs)
+	require.True(t, ok)
+	require.Equal(t, "exec_command", extracted["name"])
 }

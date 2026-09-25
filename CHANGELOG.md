@@ -1,3 +1,16 @@
+## [0.2.8-session-capacity-antistorm.18] - 2026-09-26
+### Bug Fixes
+- bps 工具中继加固。生产故障形态（2026-09-26 用户报告）：模型反复产出畸形/套娃信封 → 提取失败 → 原生 run_officejs 直通客户端 → 客户端回 "unsupported call: run_officejs" → 请求侧改写为协议重试指引 → 模型重复同类错误，工具循环卡死。修复四点：
+  - JSON 宽松修复从「非法反斜杠双写」扩展为「反斜杠 + 字符串值内裸控制字符转义」（`\n`/`\r`/`\t`/`\u00XX`）——多行 PowerShell/shell 脚本常以字面换行进入 `code` 字符串，标准 JSON 解析器直接拒收；外层 `arguments`、每层信封 `code`、信封字符串参数全部改走宽松解析（ghcp 只修反斜杠且只修内层 code）。
+  - 信封套娃拆包上限 2 → 4 层（生产出现 `run_officejs→run_officejs→…→exec` 的多层形态）。
+  - 信封工具名归一：剥 `functions.` 宿主显示前缀；目录键未命中时按裸名唯一匹配（模型对命名空间工具常只发裸名；歧义裸名仍拒绝，不猜）。
+  - 提取失败不再静默：流式拦截器记录带原因码的日志（`envelope_decode_failed` / `tool_not_in_catalog` / `schema_mismatch` / `*_parse_failed` 等），附原生名/信封名/call_id，不落载荷内容。
+- 协议重试指引补充「JSON 字符串值内用 `\\n` 等转义、禁止字面换行」的明确要求。
+
+### Notes & Caveats
+- 2026-09-26 实测定案「bps 是否原生支持工具」（research/bps-prism-probe/probe5.py、probe6.py，生产 team 号）：标准 Responses `tools` 数组（auto/强制、sol/luna）一律 422 `Invalid request body`，无工具对照组 200——该端点词汇表里没有 `tools` 字段，唯一可用工具是服务端注入的 `run_officejs`，工具中继是唯一通路；信封中继在 gpt-6-sol / gpt-6-luna / gpt-6-astra 上均验证可解。
+- 新增回归测试：字面换行（内层 code 与外层 arguments 两处）、三层套娃、裸名/前缀名归一；`go test ./...` 全绿。
+
 ## [0.2.8-session-capacity-antistorm.17] - 2026-09-26
 ### Features
 - bps 改道目录扩容：`gpt-6-sol` / `gpt-6-luna` 加入（2026-09-26 复测，bps 已开放且实得模型与请求一致；前一天还是 403 `basispoints_model_access_changed`）。至此目录为 gpt-6-astra / gpt-6-sol / gpt-6-luna / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna。

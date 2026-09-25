@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
 )
 
@@ -195,10 +196,18 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 }
 
 // finalizeNativeCall 在 output_item.done 拿到完整原生条目后产出下行事件序列：
-// 提取成功 → 客户端形状；失败 → 原生形状补发（自愈回路见文件头注释）。
+// 提取成功 → 客户端形状；失败 → 记一条带原因码的日志后按原生形状补发（自愈
+// 回路见文件头注释）。
 func (r *openAIBpsToolStreamRelay) finalizeNativeCall(buffered *openAIBpsBufferedNativeCall, fullItem map[string]any) []string {
-	extracted, ok := openAIBpsExtractNativeToolCall(fullItem, r.specs)
-	if !ok {
+	extracted, reason := openAIBpsExtractNativeToolCallReason(fullItem, r.specs)
+	if extracted == nil {
+		envelopeName := ""
+		if env := openAIBpsTransportEnvelope(fullItem); env != nil {
+			envelopeName, _ = env["name"].(string)
+		}
+		logger.LegacyPrintf("service.openai_gateway",
+			"[bps] tool relay extract failed: reason=%s native_name=%v envelope_name=%s call_id=%v",
+			reason, fullItem["name"], envelopeName, fullItem["call_id"])
 		return r.nativePassthroughLines(buffered, fullItem)
 	}
 	// 原生条目按 call_id 缓存，供下一轮历史逐字节回放。
