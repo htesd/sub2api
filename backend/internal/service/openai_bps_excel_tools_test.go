@@ -182,10 +182,6 @@ func TestOpenAIBpsExtractNativeToolCall(t *testing.T) {
 	require.Equal(t, "call_native_1", extracted["call_id"])
 	require.Equal(t, "fc_native_1", extracted["id"])
 	require.JSONEq(t, `{"cmd":"pwd"}`, extracted["arguments"].(string))
-	// 原生条目已进回放缓存。
-	remembered, hit := openAIBpsNativeCalls.Recall("call_native_1")
-	require.True(t, hit)
-	require.Equal(t, "run_officejs", remembered["name"])
 
 	// custom 工具走 input。
 	customNative := openAIBpsNativeTransportCall(`{"name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}`)
@@ -240,14 +236,14 @@ func TestOpenAIBpsExtractNativeToolCall(t *testing.T) {
 func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 	// 缓存命中：逐字节回放原生条目。
 	native := openAIBpsNativeTransportCall(`{"name":"exec_command","arguments":{"cmd":"ls"}}`)
-	openAIBpsNativeCalls.Remember(native)
+	openAIBpsNativeCalls.Remember("", native)
 	history := []any{
 		map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "hi"}},
 			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "x"}},
 		map[string]any{"type": "function_call", "call_id": "call_native_1", "name": "exec_command", "arguments": `{"cmd":"ls"}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_native_1", "output": ""},
 	}
-	translated, origins := openAIBpsTranslateInputItems(history)
+	translated, origins := openAIBpsTranslateInputItems(history, nil, "")
 	require.Len(t, translated, 3)
 	// 客户端私有元数据被剥掉。
 	require.NotContains(t, translated[0].(map[string]any), "internal_chat_message_metadata_passthrough")
@@ -263,7 +259,7 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 		map[string]any{"type": "function_call", "call_id": "call_miss", "name": "exec_command", "arguments": `{"cmd":"pwd"}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_miss", "output": "done"},
 	}
-	translated, origins = openAIBpsTranslateInputItems(miss)
+	translated, origins = openAIBpsTranslateInputItems(miss, nil, "")
 	require.Len(t, translated, 2)
 	wrapped := translated[0].(map[string]any)
 	require.Equal(t, "run_officejs", wrapped["name"])
@@ -278,7 +274,7 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 		map[string]any{"type": "custom_tool_call", "call_id": "call_cm", "name": "apply_patch", "input": "patch-body"},
 		map[string]any{"type": "custom_tool_call_output", "call_id": "call_cm", "output": "applied"},
 	}
-	translated, _ = openAIBpsTranslateInputItems(customMiss)
+	translated, _ = openAIBpsTranslateInputItems(customMiss, nil, "")
 	wrapped = translated[0].(map[string]any)
 	require.NoError(t, json.Unmarshal([]byte(wrapped["arguments"].(string)), &wrapArgs))
 	require.JSONEq(t, `{"name":"apply_patch","input":"patch-body"}`, wrapArgs["code"].(string))
@@ -290,7 +286,7 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 		map[string]any{"type": "function_call", "call_id": "call_p", "name": "update_plan", "arguments": `{"plan":[{"step":"a","status":"done"}],"explanation":"e"}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_p", "output": "Plan updated"},
 	}
-	translated, origins = openAIBpsTranslateInputItems(planHistory)
+	translated, origins = openAIBpsTranslateInputItems(planHistory, nil, "")
 	require.Equal(t, "update_plan", origins["call_p"])
 	var planCallArgs map[string]any
 	require.NoError(t, json.Unmarshal([]byte(translated[0].(map[string]any)["arguments"].(string)), &planCallArgs))
@@ -304,7 +300,7 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 		map[string]any{"type": "function_call", "call_id": "call_un", "name": "run_officejs", "arguments": `{}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_un", "output": "Unsupported call: run_officejs(...)"},
 	}
-	translated, _ = openAIBpsTranslateInputItems(unsupported)
+	translated, _ = openAIBpsTranslateInputItems(unsupported, nil, "")
 	require.Equal(t, openAIBpsTransportRetryGuidance, translated[1].(map[string]any)["output"])
 
 	// reasoning：裸条目丢弃，encrypted_content 保留且只留白名单字段。
@@ -313,13 +309,13 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 		map[string]any{"type": "reasoning", "summary": []any{map[string]any{"text": "s"}}, "encrypted_content": "enc-1", "extra": "x"},
 		map[string]any{"type": "item_reference", "id": "ref-1"},
 	}
-	translated, _ = openAIBpsTranslateInputItems(withReasoning)
+	translated, _ = openAIBpsTranslateInputItems(withReasoning, nil, "")
 	require.Len(t, translated, 1)
 	require.Equal(t, "enc-1", translated[0].(map[string]any)["encrypted_content"])
 	require.NotContains(t, translated[0].(map[string]any), "extra")
 
 	// 字符串输入包装成 user 消息。
-	translated, _ = openAIBpsTranslateInputItems("ping")
+	translated, _ = openAIBpsTranslateInputItems("ping", nil, "")
 	require.Len(t, translated, 1)
 	require.Equal(t, "user", translated[0].(map[string]any)["role"])
 }
@@ -338,7 +334,7 @@ func TestOpenAIBpsRewriteCompletedToolCalls(t *testing.T) {
 		},
 	}
 	raw, _ := json.Marshal(event)
-	rewritten, changed := openAIBpsRewriteCompletedToolCalls(raw, specs, nil)
+	rewritten, changed := openAIBpsRewriteCompletedToolCalls(raw, specs, nil, "")
 	require.True(t, changed)
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(rewritten, &decoded))
@@ -351,16 +347,16 @@ func TestOpenAIBpsRewriteCompletedToolCalls(t *testing.T) {
 
 	// 裸响应外形（非流式折叠后的响应体）。
 	bare, _ := json.Marshal(map[string]any{"id": "resp_2", "output": []any{native}})
-	rewritten, changed = openAIBpsRewriteCompletedToolCalls(bare, specs, nil)
+	rewritten, changed = openAIBpsRewriteCompletedToolCalls(bare, specs, nil, "")
 	require.True(t, changed)
 	require.NoError(t, json.Unmarshal(rewritten, &decoded))
 	require.Equal(t, "exec_command", decoded["output"].([]any)[1-1].(map[string]any)["name"])
 
 	// 无工具调用 / 无目录 → 不动。
 	messageOnly, _ := json.Marshal(map[string]any{"output": []any{map[string]any{"type": "message"}}})
-	_, changed = openAIBpsRewriteCompletedToolCalls(messageOnly, specs, nil)
+	_, changed = openAIBpsRewriteCompletedToolCalls(messageOnly, specs, nil, "")
 	require.False(t, changed)
-	_, changed = openAIBpsRewriteCompletedToolCalls(raw, nil, nil)
+	_, changed = openAIBpsRewriteCompletedToolCalls(raw, nil, nil, "")
 	require.False(t, changed)
 }
 

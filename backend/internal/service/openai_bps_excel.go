@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -91,11 +92,13 @@ const openAIBpsToolRelayContextKey = "openai_bps_tool_relay"
 // openAIBpsToolRelayContext 是一次 bps 转发尝试的工具中继上下文。
 type openAIBpsToolRelayContext struct {
 	specs map[string]openAIBpsClientToolSpec
+	// scope 是原生调用回放缓存的隔离域（按 API Key），见 openAIBpsNativeCallScope。
+	scope string
 }
 
 // setOpenAIBpsToolRelayContext 覆盖式写入工具目录：nil 表示本次尝试无中继，
 // 同时清掉上一轮尝试（bps 失败 failover 回 codex）遗留的目录，防止误拦截。
-func setOpenAIBpsToolRelayContext(c *gin.Context, specs map[string]openAIBpsClientToolSpec) {
+func setOpenAIBpsToolRelayContext(c *gin.Context, specs map[string]openAIBpsClientToolSpec, scope string) {
 	if c == nil {
 		return
 	}
@@ -103,7 +106,15 @@ func setOpenAIBpsToolRelayContext(c *gin.Context, specs map[string]openAIBpsClie
 		c.Set(openAIBpsToolRelayContextKey, nil)
 		return
 	}
-	c.Set(openAIBpsToolRelayContextKey, &openAIBpsToolRelayContext{specs: specs})
+	c.Set(openAIBpsToolRelayContextKey, &openAIBpsToolRelayContext{specs: specs, scope: scope})
+}
+
+// openAIBpsNativeCallScope 返回原生调用回放缓存的隔离域：按 API Key 隔离，
+// 不同租户即使构造出相同 call_id 也取不到彼此的原生条目。不按账号隔离——
+// 同一对话 failover 换号后仍应命中逐字节回放。无 API Key（内部调用/测试）
+// 时退化为公共域。
+func openAIBpsNativeCallScope(c *gin.Context) string {
+	return fmt.Sprintf("apikey:%d", getAPIKeyIDFromContext(c))
 }
 
 func openAIBpsToolRelayFromContext(c *gin.Context) *openAIBpsToolRelayContext {
@@ -182,13 +193,73 @@ func openAIBpsExcelReasoningEffort(effort string) string {
 	}
 }
 
+// openAIBpsDroppableHostedToolTypes 是改道 bps 时允许静默丢弃的托管工具类型。
+// 这些工具在 Codex CLI 请求里几乎每轮都带（web_search / tool_search 默认开启，
+// image_generation 由分组桥接注入），排除它们等于让 Codex 流量永远走不了 bps；
+// 目录提示词已明确告诉模型 web-search 等原生工具不可用。其余托管工具（mcp、
+// local_shell、file_search、code_interpreter、computer_use 等）一旦丢弃就改变
+// 请求能力，留在 codex 上游。
+var openAIBpsDroppableHostedToolTypes = map[string]bool{
+	"image_generation":   true,
+	"web_search":         true,
+	"web_search_preview": true,
+	"tool_search":        true,
+}
+
+// openAIBpsRequestToolsRelayable 判定请求的工具声明能否在 bps 上成立：
+// tool_choice 强制（required / 指定工具对象）无法经信封中继兑现；目录外的托管
+// 工具不能静默丢弃。tool_choice:"none" 时工具声明无效，一律放行。
+func openAIBpsRequestToolsRelayable(decoded map[string]any) bool {
+	if decoded == nil {
+		return true
+	}
+	switch choice := decoded["tool_choice"].(type) {
+	case nil:
+	case string:
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "none":
+			return true
+		case "", "auto":
+		default:
+			// required 等强制档：bps 无法保证模型一定发起调用。
+			return false
+		}
+	default:
+		// 对象形态（指定函数 / 指定托管工具，如图片接口的 image_generation）。
+		return false
+	}
+	tools, _ := decoded["tools"].([]any)
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		toolType, _ := tool["type"].(string)
+		toolType = strings.ToLower(strings.TrimSpace(toolType))
+		switch toolType {
+		case "function", "custom", "namespace":
+		default:
+			if !openAIBpsDroppableHostedToolTypes[toolType] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // openAIBpsExcelRequestEligible 判定当前请求能否改道 bps。
-// 只读 gin context、账号与最终请求体，不改变任何状态。
-func openAIBpsExcelRequestEligible(c *gin.Context, account *Account, body []byte) bool {
+// 只读 context、gin context、账号与最终请求体，不改变任何状态。
+func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account *Account, body []byte) bool {
 	if account == nil || !account.UsesOpenAICodexProtocol() {
 		return false
 	}
 	if !openAIBpsExcelEnabled(account) {
+		return false
+	}
+	// 图片接口自建的 Responses 请求（强制 image_generation 工具）：调用方会在
+	// buildUpstreamRequest 之后把 URL 改回 codex 端点，改道只会产出 URL/Host/
+	// 请求体互相矛盾的请求；bps 也没有图像生成能力。
+	if isOpenAIImagesSelfBuiltRequest(ctx) {
 		return false
 	}
 	// compact 请求的上游是 /responses/compact，bps 没有对应端点。
@@ -211,9 +282,18 @@ func openAIBpsExcelRequestEligible(c *gin.Context, account *Account, body []byte
 	// 入站的转换层不认识信封，带工具的请求在那些入站仍留在 codex 上游。
 	// tool_choice:"none" 与纯 image_generation 不产生中继目录，视为无工具。
 	var decodedForTools map[string]any
-	if err := json.Unmarshal(body, &decodedForTools); err == nil && len(openAIBpsClientToolSpecs(decodedForTools)) > 0 && !openAIBpsExcelToolRelayIngress(c) {
+	if err := json.Unmarshal(body, &decodedForTools); err != nil {
 		return false
 	}
+	if len(openAIBpsClientToolSpecs(decodedForTools)) > 0 && !openAIBpsExcelToolRelayIngress(c) {
+		return false
+	}
+	if !openAIBpsRequestToolsRelayable(decodedForTools) {
+		return false
+	}
+	// previous_response_id 不参与判定：OAuth 账号的 HTTP 路径在构建请求前已统一
+	// 删除该字段（forwardOpenAI 的 markPatchDelete），codex 上游同样收不到，
+	// 回落 codex 不会更好。
 	// 结构化输出（text.format）与 service_tier 在 bps 词汇表外，静默丢弃会改变
 	// 请求语义，留在 codex 上游。
 	formatType := strings.TrimSpace(gjson.GetBytes(body, "text.format.type").String())
@@ -239,7 +319,8 @@ func openAIBpsExcelToolRelayIngress(c *gin.Context) bool {
 // rewriteOpenAIBodyForBpsExcel 把最终 codex 形状请求体重写为 bps 白名单形状。
 // 调用前提是 openAIBpsExcelRequestEligible 已通过。返回重写后的请求体与本次
 // 请求的客户端工具目录（无工具时为 nil，响应侧据此决定是否挂中继拦截）。
-func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, map[string]openAIBpsClientToolSpec, error) {
+// scope 是原生调用回放缓存的隔离域（openAIBpsNativeCallScope）。
+func rewriteOpenAIBodyForBpsExcel(body []byte, scope string) ([]byte, map[string]openAIBpsClientToolSpec, error) {
 	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, nil, fmt.Errorf("decode request body for bps rewrite: %w", err)
@@ -258,7 +339,7 @@ func rewriteOpenAIBodyForBpsExcel(body []byte) ([]byte, map[string]openAIBpsClie
 	// 历史条目先翻译（工具调用回放成 run_officejs 原生形状、剥掉客户端私有元数据、
 	// 滤掉裸 reasoning），再前置工具目录序言。客户端 tools 字段不上行——bps 没有
 	// tools 词汇，目录经 developer 消息注入。
-	translatedInput, _ := openAIBpsTranslateInputItems(decoded["input"])
+	translatedInput, _ := openAIBpsTranslateInputItems(decoded["input"], specs, scope)
 	prologue := []any{openAIBpsMessageItem("developer", openAIBpsCatalogInstructions(specs))}
 	if reminder := openAIBpsCatalogReminder(specs); reminder != "" {
 		prologue = append(prologue, openAIBpsMessageItem("developer", reminder))

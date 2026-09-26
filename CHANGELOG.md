@@ -1,3 +1,21 @@
+## [0.2.8-session-capacity-antistorm.21] - 2026-09-26
+### Bug Fixes
+- 图片接口（`/v1/images/*`）在开了 bps 的账号上被错误改道：自建请求体用 `gpt-5.6-luna` + 仅 image_generation 工具，资格判定放行后 `buildUpstreamRequest` 把请求体/Host/头改成 bps 形状，调用方随后又把 URL 改回 codex 端点，产出 URL/Host/请求体互相矛盾的请求。现在图片自建上下文（`isOpenAIImagesSelfBuiltRequest`）与对象形态 `tool_choice` 一律不改道。
+- 历史回放套娃：上一轮提取失败、原样下发给客户端的原生 `run_officejs` 调用，回放时被按信封再包一层（`run_officejs{code:{"name":"run_officejs"}}`），模型在自己的历史里看到禁止形态并模仿，原始参数也丢失——.18 那次工具循环卡死的放大器之一。现在传输名调用原样回放；目录外的原生工具调用（list_skills 等）同样原样回放；命名空间工具按 `namespace.name` 查目录。
+- 目录外托管工具与强制调用不再静默丢弃：`tool_choice:"required"` / 指定工具对象，以及 mcp / local_shell / file_search / code_interpreter / computer_use 等托管工具的请求留在 codex 上游。web_search / web_search_preview / tool_search / image_generation 仍可丢弃（Codex CLI 几乎每轮都带，排除即等于关闭 bps）。
+- 原生调用回放缓存：由「按 call_id 的全局 FIFO」改为「按 (API Key, call_id) 隔离的真 LRU」（Recall 刷新位置），容量 512 → 2048；提取失败的原生条目也写入缓存。
+- 信封缺 `arguments`（或为空串/null）按 `{}` 提取，是否合法交给目录 schema 校验。
+- 信封键名别名在包装层判定之前归一：`{"tool":"x","code":...}` 不再被当作无名参数壳拆开，`{"tool":"run_officejs","args":{...}}` 被识别为包装层。
+- 流式拦截：缓冲判定改用与提取相同的名字解析（`functions.` 前缀、裸名唯一匹配），不再出现「流式下发原生形状、completed.output 却是客户端形状」；`response.incomplete` / `response.failed` 的 output 同样改写；终态到达时仍在缓冲的条目按终态里的完整条目补发 added→done 事件（找不到则记日志）；吞掉的参数增量回调停止首输出计时器，长参数工具调用不再被误判上游卡死而 failover（不标记客户端已输出，pre-output failover 仍可用）。
+
+### Design Rationale
+- 审查中「previous_response_id 被丢弃」一项核实为误报：OAuth 账号的 HTTP 路径在构建请求前已统一删除该字段（`forwardOpenAI` 的 `markPatchDelete`），codex 上游同样收不到，不作为改道条件。
+- `parallel_tool_calls:false` 不作为排除条件：bps 无法强制单调用，但 Codex 等客户端能顺序处理同一响应里的多个调用；把它列为排除条件会让大量 Codex 流量失去 bps。
+
+### Notes & Caveats
+- 新增 `openai_bps_excel_fixes_test.go`（10 组回归）；`go test ./...` 全绿，`go test -tags=unit ./...` 仅剩 4 个已知存量失败（TestConfigKeysAreEnvReachable / TestAPIContracts / TestBackendModeUserGuard / TestUpdateSettings_InvalidatesBackendModeCache，与本次无关）。
+- 回放缓存隔离域按 API Key：同一 Key 跨账号 failover 仍能命中逐字节回放；换 Key 续同一对话会退化为信封重合成（功能不受影响）。
+
 ## [0.2.8-session-capacity-antistorm.20] - 2026-09-26
 ### Bug Fixes
 - bps 工具信封键名别名归一：.19 的键名日志当场抓到真实形态 `envelope_keys=args,tool`——模型把信封写成 `{"tool":"<工具名>","args":{...}}` 而非指引约定的 `{"name":...,"arguments":...}`，连续三轮 `tool_not_in_catalog`。现在 `tool`/`tool_name`/`function` 归一到 name，`args`/`parameters`/`params` 归一到 arguments，custom 工具的字符串 `args` 归一到 input；别名的值是 JSON 字符串也走宽松解析。

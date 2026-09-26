@@ -36,7 +36,7 @@ func openAIBpsSSELines(eventType string, payload map[string]any) []string {
 
 func TestOpenAIBpsToolStreamRelayInterceptsTransportCall(t *testing.T) {
 	specs := openAIBpsTestSpecs()
-	relay := newOpenAIBpsToolStreamRelay(specs)
+	relay := newOpenAIBpsToolStreamRelay(specs, "")
 
 	nativeArgs, _ := json.Marshal(map[string]any{
 		"summary": "Check weather", "extended_summary": "x", "destructive": false, "references": []any{},
@@ -120,13 +120,13 @@ func TestOpenAIBpsToolStreamRelayInterceptsTransportCall(t *testing.T) {
 	require.Equal(t, int64(10), completed.Get("response.usage.input_tokens").Int())
 
 	// 原生条目已缓存，供下一轮历史回放。
-	_, hit := openAIBpsNativeCalls.Recall("call_up_1")
+	_, hit := openAIBpsNativeCalls.Recall("", "call_up_1")
 	require.True(t, hit)
 }
 
 func TestOpenAIBpsToolStreamRelayPassthrough(t *testing.T) {
 	specs := openAIBpsTestSpecs()
-	relay := newOpenAIBpsToolStreamRelay(specs)
+	relay := newOpenAIBpsToolStreamRelay(specs, "")
 
 	var lines []string
 	// 消息条目：output_item.added 是受管事件族但内容为 message → 直通。
@@ -154,7 +154,7 @@ func TestOpenAIBpsToolStreamRelayPassthrough(t *testing.T) {
 
 func TestOpenAIBpsToolStreamRelayMalformedEnvelopePassthrough(t *testing.T) {
 	specs := openAIBpsTestSpecs()
-	relay := newOpenAIBpsToolStreamRelay(specs)
+	relay := newOpenAIBpsToolStreamRelay(specs, "")
 
 	nativeItem := map[string]any{
 		"type": "function_call", "id": "fc_bad", "call_id": "call_bad",
@@ -177,7 +177,7 @@ func TestOpenAIBpsToolStreamRelayMalformedEnvelopePassthrough(t *testing.T) {
 
 func TestOpenAIBpsToolStreamRelayCustomToolCall(t *testing.T) {
 	specs := openAIBpsTestSpecs()
-	relay := newOpenAIBpsToolStreamRelay(specs)
+	relay := newOpenAIBpsToolStreamRelay(specs, "")
 
 	patch := "*** Begin Patch\n*** Update File: a.go\n*** End Patch"
 	envelope, _ := json.Marshal(map[string]any{"name": "apply_patch", "input": patch})

@@ -116,53 +116,53 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	disabled := openAIBpsExcelTestAccount(nil)
 	c, _ := gin.CreateTestContext(nil)
 
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra")))
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-5.6-sol")))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra")))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-5.6-sol")))
 	// 开关关闭 / 账号类型不符 / nil。
-	require.False(t, openAIBpsExcelRequestEligible(c, disabled, openAIBpsExcelBody("gpt-6-astra")))
-	require.False(t, openAIBpsExcelRequestEligible(c, nil, openAIBpsExcelBody("gpt-6-astra")))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, disabled, openAIBpsExcelBody("gpt-6-astra")))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, nil, openAIBpsExcelBody("gpt-6-astra")))
 	apiKeyAccount := openAIBpsExcelTestAccount(map[string]any{OpenAIBpsExcelEnabledExtraKey: true})
 	apiKeyAccount.Type = AccountTypeAPIKey
-	require.False(t, openAIBpsExcelRequestEligible(c, apiKeyAccount, openAIBpsExcelBody("gpt-6-astra")))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, apiKeyAccount, openAIBpsExcelBody("gpt-6-astra")))
 	// 模型目录外。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-nova")))
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-5.5")))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-nova")))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-5.5")))
 	// gpt-6-sol/luna 已在 bps 目录（2026-09-26 复测开放）。
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-sol")))
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-luna")))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-sol")))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-luna")))
 	// 容量记账账号不再整体排除：bps 流量不产生 codex 会话，准入簿记保守成立。
 	capacityAccount := openAIBpsExcelTestAccount(map[string]any{
 		OpenAIBpsExcelEnabledExtraKey: true,
 		"codex_fingerprint_mode":      "capacity",
 	})
-	require.True(t, openAIBpsExcelRequestEligible(c, capacityAccount, openAIBpsExcelBody("gpt-6-astra")))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, capacityAccount, openAIBpsExcelBody("gpt-6-astra")))
 	// 客户端 function/custom 工具：原生 responses 入站经 run_officejs 中继放行；
 	// 无入站请求信息或 messages 入站（转换层不认识信封）仍留 codex 上游。
 	responsesCtx := openAIBpsExcelResponsesContext()
-	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
-	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"custom","name":"apply_patch"}]`)))
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
-	require.False(t, openAIBpsExcelRequestEligible(openAIBpsExcelMessagesContext(), enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), openAIBpsExcelMessagesContext(), enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
 	// tool_choice:"none" 视为无工具：无入站信息也可改道。
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","parameters":{}}],"tool_choice":"none"`)))
 	// 仅图像生成工具（分组桥接注入的形状）→ 仍可改道。
-	require.True(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation","action":"","model":""}]`)))
 	// 图像生成 + function 混合：responses 入站放行（function 走中继，图像工具不进目录）。
-	require.True(t, openAIBpsExcelRequestEligible(responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation"},{"type":"function","name":"x"}]`)))
 	// 图片输入 → codex 上游。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
 	// 结构化输出 → codex 上游。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"text":{"format":{"type":"json_schema","name":"s","schema":{}}}`)))
 	// service_tier（Fast/Flex）→ codex 上游。
-	require.False(t, openAIBpsExcelRequestEligible(c, enabled, openAIBpsExcelBody("gpt-6-astra",
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"service_tier":"priority"`)))
 }
 
@@ -188,7 +188,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 			{"type":"function_call_output","call_id":"c1","output":"ok"}
 		]
 	}`)
-	rewritten, specs, err := rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, specs, err := rewriteOpenAIBodyForBpsExcel(body, "")
 	require.NoError(t, err)
 	// image_generation 不是客户端 function/custom 工具，不进中继目录。
 	require.Empty(t, specs)
@@ -245,7 +245,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 	require.Len(t, turnID, 36)
 
 	// 确定性：同一请求体重写两次，派生标识逐字一致。
-	again, _, err := rewriteOpenAIBodyForBpsExcel(body)
+	again, _, err := rewriteOpenAIBodyForBpsExcel(body, "")
 	require.NoError(t, err)
 	var out2 map[string]any
 	require.NoError(t, json.Unmarshal(again, &out2))
@@ -260,7 +260,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 		"content": []any{map[string]any{"type": "input_text", "text": "next turn"}},
 	})
 	nextBody, _ := json.Marshal(decoded)
-	nextRewritten, _, err := rewriteOpenAIBodyForBpsExcel(nextBody)
+	nextRewritten, _, err := rewriteOpenAIBodyForBpsExcel(nextBody, "")
 	require.NoError(t, err)
 	var out3 map[string]any
 	require.NoError(t, json.Unmarshal(nextRewritten, &out3))
@@ -273,7 +273,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 func TestRewriteOpenAIBodyForBpsExcelEffortFallback(t *testing.T) {
 	// 顶层 reasoning_effort 兼容写法同样被认（antistorm.12 的 none 档口径）。
 	body := []byte(`{"model":"gpt-5.6-sol","reasoning_effort":"high","input":"ping"}`)
-	rewritten, _, err := rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, _, err := rewriteOpenAIBodyForBpsExcel(body, "")
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rewritten, &out))
@@ -289,7 +289,7 @@ func TestRewriteOpenAIBodyForBpsExcelEffortFallback(t *testing.T) {
 
 	// 无 effort 信息默认 medium。
 	body = []byte(`{"model":"gpt-5.6-terra","input":"ping"}`)
-	rewritten, _, err = rewriteOpenAIBodyForBpsExcel(body)
+	rewritten, _, err = rewriteOpenAIBodyForBpsExcel(body, "")
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(rewritten, &out))
 	require.Equal(t, "medium", out["reasoning_effort"])
@@ -371,6 +371,6 @@ func TestBuildUpstreamRequestBpsExcelIneligible(t *testing.T) {
 	}
 	// gpt-6-nova 不在 bps 目录内 → 资格不通过（codex 路径的后续装饰需要完整服务
 	// 依赖，这里只验证资格判定本身，不调用 buildUpstreamRequest 走到底）。
-	require.False(t, openAIBpsExcelRequestEligible(nil, account, []byte(`{"model":"gpt-6-nova","input":"ping"}`)))
-	require.False(t, openAIBpsExcelRequestEligible(nil, account, []byte(`{"model":"gpt-6-astra","tools":[{"type":"function","name":"x"}],"input":"ping"}`)))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), nil, account, []byte(`{"model":"gpt-6-nova","input":"ping"}`)))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), nil, account, []byte(`{"model":"gpt-6-astra","tools":[{"type":"function","name":"x"}],"input":"ping"}`)))
 }

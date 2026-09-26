@@ -58,7 +58,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var bpsRelay *openAIBpsToolStreamRelay
 	if openAIBpsExcelUsed(c) {
 		if relayCtx := openAIBpsToolRelayFromContext(c); relayCtx != nil {
-			bpsRelay = newOpenAIBpsToolStreamRelay(relayCtx.specs)
+			bpsRelay = newOpenAIBpsToolStreamRelay(relayCtx.specs, relayCtx.scope)
 		}
 	}
 	// 降智阻断策略在进入流处理前取一次，避免每个 SSE 帧都读设置缓存。
@@ -244,6 +244,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		firstOutputTimer = nil
 		firstOutputCh = nil
+	}
+	// bps 中继吞掉的工具参数增量是真实的上游进度：只停首输出计时器（上游没卡死），
+	// 不标记客户端已输出——之后的失败仍可走 pre-output failover。
+	// processSSELine 与计时器 select 同在主循环 goroutine，这里无需加锁。
+	if bpsRelay != nil {
+		bpsRelay.onProgress = stopFirstOutputTimer
 	}
 	// Track downstream writes separately from upstream reads: pre-output failover
 	// can buffer response.created / response.in_progress, so keepalive must be
@@ -1784,7 +1790,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		// bps 工具中继：折叠后的响应里仍是 run_officejs 原生调用，还原成客户端
 		// 工具调用再下发（同时把原生条目写入回放缓存，供下一轮历史逐字节回放）。
 		if relayCtx := openAIBpsToolRelayFromContext(c); relayCtx != nil && openAIBpsExcelUsed(c) {
-			if rewritten, changed := openAIBpsRewriteCompletedToolCalls(body, relayCtx.specs, nil); changed {
+			if rewritten, changed := openAIBpsRewriteCompletedToolCalls(body, relayCtx.specs, nil, relayCtx.scope); changed {
 				body = rewritten
 			}
 		}

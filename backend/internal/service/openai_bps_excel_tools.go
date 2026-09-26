@@ -1,6 +1,7 @@
 package service
 
 import (
+	"container/list"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -464,6 +465,9 @@ func openAIBpsTransportEnvelope(native map[string]any) map[string]any {
 	}
 	envelope := openAIBpsDecodeTransportCode(arguments["code"])
 	for i := 0; i < openAIBpsTransportMaxUnwrap; i++ {
+		// 别名先于包装层判定归一：{"tool":"x","code":...} 带名字，不是无名参数壳；
+		// {"tool":"run_officejs","args":{...}} 是传输名包装层，要继续拆。
+		openAIBpsNormalizeEnvelopeAliases(envelope)
 		if !openAIBpsEnvelopeIsWrapper(envelope) {
 			break
 		}
@@ -700,21 +704,34 @@ func openAIBpsRestoreNativePlanArguments(arguments any) (string, bool) {
 	return string(raw), true
 }
 
-// openAIBpsNativeCallCache 按 call_id 缓存上游原生调用条目（LRU，512 条）。
+// openAIBpsNativeCallCache 按 (scope, call_id) 缓存上游原生调用条目（真 LRU）。
 // 客户端提交工具结果时会丢掉服务端条目 id，逐字节回放原条目不仅保住 id，
 // 也让加密思维链能把结果关联到原调用（ghcp 同名机制的移植）。
+//
+// scope 按 API Key 隔离（openAIBpsNativeCallScope）：call_id 是客户端可控输入，
+// 只按 call_id 取会让一个租户构造的 call_id 回放出另一个租户的原生条目。
+// Recall 命中会刷新位置：慢工具执行期间条目不被新流量挤出。
 type openAIBpsNativeCallCache struct {
 	mu    sync.Mutex
 	limit int
-	order []string
-	items map[string]map[string]any
+	lru   *list.List               // 元素值为 *openAIBpsNativeCallEntry，队首最新
+	index map[string]*list.Element // scope+"\x00"+call_id → 元素
+}
+
+type openAIBpsNativeCallEntry struct {
+	key  string
+	item map[string]any
 }
 
 func newOpenAIBpsNativeCallCache(limit int) *openAIBpsNativeCallCache {
 	if limit <= 0 {
-		limit = 512
+		limit = 2048
 	}
-	return &openAIBpsNativeCallCache{limit: limit, items: make(map[string]map[string]any)}
+	return &openAIBpsNativeCallCache{limit: limit, lru: list.New(), index: make(map[string]*list.Element)}
+}
+
+func openAIBpsNativeCallCacheKey(scope, callID string) string {
+	return scope + "\x00" + callID
 }
 
 func cloneOpenAIBpsItem(item map[string]any) map[string]any {
@@ -729,7 +746,7 @@ func cloneOpenAIBpsItem(item map[string]any) map[string]any {
 	return cloned
 }
 
-func (c *openAIBpsNativeCallCache) Remember(item map[string]any) {
+func (c *openAIBpsNativeCallCache) Remember(scope string, item map[string]any) {
 	if c == nil || item == nil {
 		return
 	}
@@ -741,35 +758,41 @@ func (c *openAIBpsNativeCallCache) Remember(item map[string]any) {
 	if cloned == nil {
 		return
 	}
+	key := openAIBpsNativeCallCacheKey(scope, callID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.items[callID]; !exists {
-		c.order = append(c.order, callID)
+	if elem, exists := c.index[key]; exists {
+		elem.Value.(*openAIBpsNativeCallEntry).item = cloned
+		c.lru.MoveToFront(elem)
+		return
 	}
-	c.items[callID] = cloned
-	for len(c.order) > c.limit {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		delete(c.items, oldest)
+	c.index[key] = c.lru.PushFront(&openAIBpsNativeCallEntry{key: key, item: cloned})
+	for c.lru.Len() > c.limit {
+		oldest := c.lru.Back()
+		c.lru.Remove(oldest)
+		delete(c.index, oldest.Value.(*openAIBpsNativeCallEntry).key)
 	}
 }
 
-func (c *openAIBpsNativeCallCache) Recall(callID string) (map[string]any, bool) {
+func (c *openAIBpsNativeCallCache) Recall(scope, callID string) (map[string]any, bool) {
 	if c == nil || callID == "" {
 		return nil, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	item, ok := c.items[callID]
+	elem, ok := c.index[openAIBpsNativeCallCacheKey(scope, callID)]
 	if !ok {
 		return nil, false
 	}
-	cloned := cloneOpenAIBpsItem(item)
+	c.lru.MoveToFront(elem)
+	cloned := cloneOpenAIBpsItem(elem.Value.(*openAIBpsNativeCallEntry).item)
 	return cloned, cloned != nil
 }
 
 // openAIBpsNativeCalls 是进程级原生调用缓存（单实例部署，等价 ghcp 的全局缓存）。
-var openAIBpsNativeCalls = newOpenAIBpsNativeCallCache(512)
+// 容量从 512 提到 2048：全体租户共用一个池，512 在并发工具流量下会在慢工具执行
+// 期间被挤出；单条目通常数 KB（apply_patch 可达数十 KB），2048 条内存可控。
+var openAIBpsNativeCalls = newOpenAIBpsNativeCallCache(2048)
 
 // openAIBpsFunctionItemID 从 call_id 派生确定性的条目 id：重试序列化必须逐字节一致，
 // 否则上游 prompt cache 前缀每轮都断（ghcp responses_replay_ids 的语义复刻）。
@@ -843,7 +866,7 @@ func openAIBpsExtractNativeToolCallReason(native map[string]any, specs map[strin
 		callID = openAIBpsNativeFallbackCallIDPrefix + strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
 	nativeItemID, _ := native["id"].(string)
-	openAIBpsNativeCalls.Remember(native)
+	// 原生条目写入回放缓存由调用方负责（需要隔离域，且提取失败的条目也要记）。
 
 	if spec.Type == "function" {
 		var arguments map[string]any
@@ -852,10 +875,18 @@ func openAIBpsExtractNativeToolCallReason(native map[string]any, specs map[strin
 			case map[string]any:
 				arguments = raw
 			case string:
+				if strings.TrimSpace(raw) == "" {
+					arguments = map[string]any{}
+					break
+				}
 				arguments = openAIBpsParseJSONObjectLoose(raw)
 				if arguments == nil {
 					return nil, "envelope_arguments_parse_failed"
 				}
+			case nil:
+				// 无参工具常见写法：信封只有 name（或 arguments:null）。按空对象处理，
+				// 是否合法交给下方 schema 校验（有 required 字段的会被拒）。
+				arguments = map[string]any{}
 			}
 		} else {
 			if nativeType != "function_call" {
@@ -1068,8 +1099,9 @@ func openAIBpsNormalizedToolOutput(item map[string]any, callOrigins map[string]s
 
 // openAIBpsTranslateInputItems 把客户端 Responses 输入项翻译成 bps 词汇
 // （ghcp translate_input_items 的移植）。返回翻译后的条目与本请求内推断出的
-// call_id → 原生来源（update_plan / run_officejs）映射。
-func openAIBpsTranslateInputItems(rawInput any) ([]any, map[string]string) {
+// call_id → 原生来源（update_plan / run_officejs / 其他原生工具名）映射。
+// specs 是本请求的客户端工具目录，scope 是回放缓存隔离域。
+func openAIBpsTranslateInputItems(rawInput any, specs map[string]openAIBpsClientToolSpec, scope string) ([]any, map[string]string) {
 	callOrigins := map[string]string{}
 	if text, ok := rawInput.(string); ok {
 		return []any{openAIBpsMessageItem("user", text)}, callOrigins
@@ -1100,7 +1132,7 @@ func openAIBpsTranslateInputItems(rawInput any) ([]any, map[string]string) {
 		case "function_call", "custom_tool_call":
 			name, _ := item["name"].(string)
 			callID, _ := item["call_id"].(string)
-			if remembered, hit := openAIBpsNativeCalls.Recall(callID); hit {
+			if remembered, hit := openAIBpsNativeCalls.Recall(scope, callID); hit {
 				if nativeName, _ := remembered["name"].(string); nativeName != "" {
 					callOrigins[callID] = nativeName
 				}
@@ -1108,6 +1140,15 @@ func openAIBpsTranslateInputItems(rawInput any) ([]any, map[string]string) {
 				continue
 			}
 			if name == "" {
+				result = append(result, item)
+				continue
+			}
+			// 客户端历史里的传输名调用 = 上一轮提取失败、原样下发的原生 run_officejs。
+			// 它本来就是原生形状，必须原样回放：再按信封包一层会产出
+			// run_officejs{code:{"name":"run_officejs"}} 套娃，模型在自己的历史里看到
+			// 禁止形态后会模仿，且原始参数丢失。
+			if openAIBpsIsTransportName(name) {
+				callOrigins[callID] = openAIBpsToolTransportName
 				result = append(result, item)
 				continue
 			}
@@ -1122,6 +1163,20 @@ func openAIBpsTranslateInputItems(rawInput any) ([]any, map[string]string) {
 				}
 				result = append(result, item)
 				continue
+			}
+			// 目录外的名字（list_skills 等服务端原生工具被直通给客户端后回传）也是
+			// 原生调用，原样回放。目录为空时无从区分客户端工具与原生工具，保持
+			// 按信封重合成的旧行为。
+			if len(specs) > 0 {
+				lookup := name
+				if ns, _ := item["namespace"].(string); strings.TrimSpace(ns) != "" && !strings.Contains(name, ".") {
+					lookup = strings.TrimSpace(ns) + "." + name
+				}
+				if _, inCatalog := openAIBpsResolveClientToolSpec(lookup, specs); !inCatalog {
+					callOrigins[callID] = name
+					result = append(result, item)
+					continue
+				}
 			}
 			fallback := openAIBpsFallbackTransportCall(item)
 			callOrigins[callID] = openAIBpsToolTransportName

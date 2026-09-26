@@ -1421,12 +1421,13 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 为 bps 白名单形状。重写失败只记日志并回落 codex 上游，不让可转发的请求因为
 	// 改道失败而报错。
 	useBpsExcel := false
-	if openAIBpsExcelRequestEligible(c, account, body) {
-		if rewritten, specs, rewriteErr := rewriteOpenAIBodyForBpsExcel(body); rewriteErr == nil {
+	if openAIBpsExcelRequestEligible(ctx, c, account, body) {
+		scope := openAIBpsNativeCallScope(c)
+		if rewritten, specs, rewriteErr := rewriteOpenAIBodyForBpsExcel(body, scope); rewriteErr == nil {
 			body = rewritten
 			targetURL = openAIBpsExcelURL
 			useBpsExcel = true
-			setOpenAIBpsToolRelayContext(c, specs)
+			setOpenAIBpsToolRelayContext(c, specs, scope)
 		} else {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] bps excel rewrite failed, fallback to codex upstream (account: %s): %v", account.Name, rewriteErr)
 		}
@@ -1437,7 +1438,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		c.Set(openAIBpsExcelUsedContextKey, useBpsExcel)
 	}
 	if !useBpsExcel {
-		setOpenAIBpsToolRelayContext(c, nil)
+		setOpenAIBpsToolRelayContext(c, nil, "")
 		targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 	}
 

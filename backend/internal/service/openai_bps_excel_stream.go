@@ -38,6 +38,9 @@ var openAIBpsRelayManagedEventTypes = map[string]bool{
 	"response.custom_tool_call_input.done":   true,
 	"response.completed":                     true,
 	"response.done":                          true,
+	// 非成功终态的 response.output 同样可能内嵌原生 run_officejs 条目。
+	"response.incomplete": true,
+	"response.failed":     true,
 }
 
 type openAIBpsRelayAction int
@@ -60,6 +63,11 @@ type openAIBpsBufferedNativeCall struct {
 // openAIBpsToolStreamRelay 是一次 bps 流式转发的工具中继状态机。
 type openAIBpsToolStreamRelay struct {
 	specs map[string]openAIBpsClientToolSpec
+	scope string // 原生调用回放缓存隔离域
+
+	// onProgress 在吞掉受管条目的增量事件时回调：这些事件不进正常管道，
+	// 首输出超时看不到进度，长参数工具调用会被误判为上游卡死而 failover。
+	onProgress func()
 
 	buffered map[string]*openAIBpsBufferedNativeCall // 原生条目 id → 缓冲
 	// 已完成提取：原生条目 id 与 call_id 都索引到客户端形状条目，供 completed 事件改写。
@@ -70,9 +78,10 @@ type openAIBpsToolStreamRelay struct {
 	bypass           bool // 合成事件回流处理时置位，防止拦截器再拦自己
 }
 
-func newOpenAIBpsToolStreamRelay(specs map[string]openAIBpsClientToolSpec) *openAIBpsToolStreamRelay {
+func newOpenAIBpsToolStreamRelay(specs map[string]openAIBpsClientToolSpec, scope string) *openAIBpsToolStreamRelay {
 	return &openAIBpsToolStreamRelay{
 		specs:     specs,
+		scope:     scope,
 		buffered:  make(map[string]*openAIBpsBufferedNativeCall),
 		extracted: make(map[string]map[string]any),
 	}
@@ -145,8 +154,10 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 		// 传输工具调用（待解信封）与和客户端同名的原生调用（如 update_plan，
 		// 参数 schema 要归一）都缓冲到 done 再裁决；其余原生工具调用直通——
 		// 客户端会以 "unsupported call" 报错，下一轮请求侧翻译成重试指引。
+		// 名字解析与提取/completed 改写同一规则（剥 functions. 前缀、裸名唯一匹配），
+		// 否则流式下发原生形状而 completed.output 却是客户端形状。
 		if !openAIBpsIsTransportName(name) {
-			if _, ok := r.specs[name]; !ok {
+			if _, ok := openAIBpsResolveClientToolSpec(name, r.specs); !ok {
 				return openAIBpsRelayPass, nil
 			}
 		}
@@ -165,6 +176,9 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 		itemID := gjson.Get(data, "item_id").String()
 		if _, ok := r.buffered[itemID]; ok {
 			// output_item.done 携带完整条目，增量事件不需要留存。
+			if r.onProgress != nil {
+				r.onProgress()
+			}
 			return openAIBpsRelaySwallow, nil
 		}
 		return openAIBpsRelayPass, nil
@@ -182,12 +196,15 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 		}
 		return openAIBpsRelayEmit, r.finalizeNativeCall(buffered, fullItem)
 
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.incomplete", "response.failed":
+		// 终态前仍在缓冲的条目（上游没发 output_item.done 就收尾）：客户端靠
+		// output_item.done 取工具调用，不能只改 completed.output，先按终态里的
+		// 完整条目补发事件序列。
+		lines := r.flushBufferedFromTerminal(data)
 		rewritten, changed := r.rewriteCompletedOutput(data)
-		if !changed {
+		if !changed && len(lines) == 0 {
 			return openAIBpsRelayPass, nil
 		}
-		lines := make([]string, 0, 2)
 		if r.hasStash {
 			lines = append(lines, r.stashedEventLine)
 		}
@@ -201,6 +218,9 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 // 提取成功 → 客户端形状；失败 → 记一条带原因码的日志后按原生形状补发（自愈
 // 回路见文件头注释）。
 func (r *openAIBpsToolStreamRelay) finalizeNativeCall(buffered *openAIBpsBufferedNativeCall, fullItem map[string]any) []string {
+	// 原生条目无论提取成败都按 call_id 缓存：成功时供下一轮逐字节回放；失败时
+	// 客户端拿到的就是原生条目，回放命中同样逐字节一致。
+	openAIBpsNativeCalls.Remember(r.scope, fullItem)
 	extracted, reason := openAIBpsExtractNativeToolCallReason(fullItem, r.specs)
 	if extracted == nil {
 		// 只记键名不落载荷：下次再出新形态时直接从日志看懂模型的写法。
@@ -219,7 +239,7 @@ func (r *openAIBpsToolStreamRelay) finalizeNativeCall(buffered *openAIBpsBuffere
 			reason, fullItem["name"], envelopeName, envelopeKeys, fullItem["call_id"])
 		return r.nativePassthroughLines(buffered, fullItem)
 	}
-	// 原生条目按 call_id 缓存，供下一轮历史逐字节回放。
+	// 流式期间的提取结果按 call_id / 原生 id 索引，供终态 output 改写复用。
 	if callID, _ := fullItem["call_id"].(string); callID != "" {
 		r.extracted[callID] = extracted
 	}
@@ -335,7 +355,7 @@ func (r *openAIBpsToolStreamRelay) nativePassthroughLines(buffered *openAIBpsBuf
 // 原生工具调用替换为客户端形状（优先用流式期间已完成提取的结果，否则就地提取）。
 // 返回改写后的载荷与是否发生变化。
 func (r *openAIBpsToolStreamRelay) rewriteCompletedOutput(data string) (string, bool) {
-	rewritten, changed := openAIBpsRewriteCompletedToolCalls([]byte(data), r.specs, r.extracted)
+	rewritten, changed := openAIBpsRewriteCompletedToolCalls([]byte(data), r.specs, r.extracted, r.scope)
 	if !changed {
 		return data, false
 	}
@@ -345,7 +365,8 @@ func (r *openAIBpsToolStreamRelay) rewriteCompletedOutput(data string) (string, 
 // openAIBpsRewriteCompletedToolCalls 改写一个完整 response 载荷（completed 事件或
 // 非流式折叠后的 JSON 响应体）的 output 数组：原生 run_officejs / 同名原生调用
 // 替换为客户端工具调用。knownExtracted 是流式期间已提取的映射（可为 nil）。
-func openAIBpsRewriteCompletedToolCalls(payload []byte, specs map[string]openAIBpsClientToolSpec, knownExtracted map[string]map[string]any) ([]byte, bool) {
+// scope 是回放缓存隔离域：就地提取的原生条目同样写入缓存。
+func openAIBpsRewriteCompletedToolCalls(payload []byte, specs map[string]openAIBpsClientToolSpec, knownExtracted map[string]map[string]any, scope string) ([]byte, bool) {
 	if len(specs) == 0 || !gjson.ValidBytes(payload) {
 		return payload, false
 	}
@@ -384,6 +405,7 @@ func openAIBpsRewriteCompletedToolCalls(payload []byte, specs map[string]openAIB
 			}
 		}
 		if clientItem == nil {
+			openAIBpsNativeCalls.Remember(scope, item)
 			extracted, ok := openAIBpsExtractNativeToolCall(item, specs)
 			if !ok {
 				continue
@@ -407,4 +429,49 @@ func openAIBpsRewriteCompletedToolCalls(payload []byte, specs map[string]openAIB
 		return payload, false
 	}
 	return raw, true
+}
+
+// flushBufferedFromTerminal 为终态事件到达时仍在缓冲的条目补发事件序列：
+// 在终态载荷的 response.output 里按 id 找完整条目走 finalizeNativeCall；
+// 找不到的只能丢弃并记日志（客户端无从执行一个没有参数的调用）。
+func (r *openAIBpsToolStreamRelay) flushBufferedFromTerminal(data string) []string {
+	if len(r.buffered) == 0 {
+		return nil
+	}
+	fullItems := map[string]map[string]any{}
+	output := gjson.Get(data, "response.output")
+	if !output.Exists() {
+		output = gjson.Get(data, "output")
+	}
+	for _, raw := range output.Array() {
+		id := raw.Get("id").String()
+		if _, ok := r.buffered[id]; !ok {
+			continue
+		}
+		var item map[string]any
+		if err := json.Unmarshal([]byte(raw.Raw), &item); err == nil && item != nil {
+			fullItems[id] = item
+		}
+	}
+	ids := make([]string, 0, len(r.buffered))
+	for id := range r.buffered {
+		ids = append(ids, id)
+	}
+	// 按 output_index 顺序补发，保持客户端看到的条目次序。
+	sort.Slice(ids, func(i, j int) bool {
+		return r.buffered[ids[i]].outputIndex < r.buffered[ids[j]].outputIndex
+	})
+	var lines []string
+	for _, id := range ids {
+		buffered := r.buffered[id]
+		delete(r.buffered, id)
+		item, ok := fullItems[id]
+		if !ok {
+			logger.LegacyPrintf("service.openai_gateway",
+				"[bps] tool relay dropped buffered item without output_item.done: item_id=%s output_index=%d", id, buffered.outputIndex)
+			continue
+		}
+		lines = append(lines, r.finalizeNativeCall(buffered, item)...)
+	}
+	return lines
 }
