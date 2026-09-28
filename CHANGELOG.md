@@ -1,3 +1,12 @@
+## [0.2.8-session-capacity-antistorm.24] - 2026-09-28
+### Bug Fixes
+- 定位 .22 的 422 根因：**工具输出里的图片**。Codex 用 exec 的 `image()` 截图时，`custom_tool_call_output.output[]` 里带 `input_image`；bps 无视觉能力，对这类请求体直接 `422: Invalid request body.`。通用图片检测 `openAIRequestBodyMayContainImageInput` 只递归 message 的 `content`，不看工具输出的 `output`，这类请求照样改道了 bps。新增 `openAIBpsToolOutputHasImage`：function/custom 工具输出里有图片的请求留 codex 上游。
+- 为什么 .22 才出现：.21 及以前历史里的 custom 工具输出会被归一成 `function_call_output`（信封回放），bps 对 function_call_output 里的图片不报错；.22 起历史原样上行，custom_tool_call_output 带图才暴露。
+
+### Design Rationale
+- 证据：.23 开启拒收落盘后 12 分钟收集到 6 个被拒请求体，全部含工具输出图片（其中一个只有 6 条、一张 1×1 PNG）；把这个最小样本去掉图片重放，bps 200，带图重放 422。
+- .23 的 400/422 同账号回落 codex 保留，作为未知形状的兜底；本版之后带图请求不再先撞一次 bps。
+
 ## [0.2.8-session-capacity-antistorm.23] - 2026-09-28
 ### Bug Fixes
 - .22 上线后生产 Codex 流量在 bps 上大量 `422: Invalid request body.`（下游 502 Upstream request failed，13:39 起约 850 次/1 小时，只涉及开了 bps 的 5 个 team 号）。请求体校验失败与账号无关，旧逻辑既不 failover 也不回落，客户端重试一直撞墙。现在 bps 返回 400/422 时同账号改走 codex 上游重发一次，本请求后续尝试（含 failover 换号）不再改道。

@@ -43,3 +43,22 @@ func TestOpenAIBpsBodyShapeSummaryHasNoContent(t *testing.T) {
 	require.Contains(t, summary, "  function{defer_loading,name,type}")
 	require.Equal(t, "body=unavailable", openAIBpsBodyShapeSummary(nil))
 }
+
+// 工具输出里的图片（Codex exec 的 image() 截图）让 bps 直接 422：这类请求留 codex 上游。
+func TestOpenAIBpsIneligibleForImageInToolOutput(t *testing.T) {
+	account := openAIBpsExcelTestAccount(map[string]any{OpenAIBpsExcelEnabledExtraKey: true})
+	c := openAIBpsExcelResponsesContext()
+	withOutput := func(outputType, output string) []byte {
+		return []byte(`{"model":"gpt-6-astra","input":[` +
+			`{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"shot"}]},` +
+			`{"type":"custom_tool_call","call_id":"c1","name":"exec","input":"image(x)"},` +
+			`{"type":"` + outputType + `","call_id":"c1","output":` + output + `}]}`)
+	}
+	img := `[{"type":"input_text","text":"ok"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]`
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, account, withOutput("custom_tool_call_output", img)))
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, account, withOutput("function_call_output", img)))
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, account, withOutput("custom_tool_call_output", `[{"type":"input_text","text":"ok"}]`)))
+	// 文本里提到 input_image 字样不算图片。
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, account, withOutput("custom_tool_call_output", `"the input_image field"`)))
+}
