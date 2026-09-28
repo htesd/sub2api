@@ -1,3 +1,22 @@
+## [0.2.8-session-capacity-antistorm.25] - 2026-09-28
+### Features
+- bps 支持图片输入。直连 bps 实测：bps 有视觉能力（纯色图、噪声图、JPEG 都能正确识别），但只在 `function_call_output.output[]` 里收 `input_image`；放在 user 消息 content 或 `custom_tool_call_output` 里一律 `422: Invalid request body.`。.24 的"带图不改道"改为改写：
+  - 带图的 `custom_tool_call_output` → `function_call_output`（call_id、output 原样；对应的 custom_tool_call 不动，实测可配对）；
+  - 带图的 user 消息 → 只含文本的消息 + 合成 `user_attachment` 调用对（图片进 function_call_output），消息只有图片时补一句占位文本。
+- 资格判定由 `openAIRequestBodyMayContainImageInput`/`openAIBpsToolOutputHasImage` 改为 `openAIBpsImagePlacementSupported`：只有改写处理不了的位置（assistant/developer 消息里的图、file_id 引用、chat completions `messages` 里的图）才留 codex。
+
+### Design Rationale
+- ghcp 能力表的 `vision:false` 是它本地的保守声明，不是上游事实。
+- 合成 call_id 由"带图消息序号 + 原消息内容"sha256 派生，同一会话每轮逐字节一致；实测改写后请求连发两次，第二次 cached 22772/22839。
+- 合成调用名不进客户端目录：模型若模仿历史去调用，按目录外名字走既有的 unsupported call → 可用工具指引。
+
+- 文件（PDF 等 `input_file`）bps 不收：`file_data` 放在 user 消息、function/custom 工具输出、合成调用对里一律 422，`file_url` 会被当远程地址下载。新增 `openAIBpsRequestHasFile`，带文件的请求留 codex。.24 没拦这一类，opencode 用 read 工具读 PDF 后的请求会先撞一次 bps 422，再靠 .23 的回落走 codex。
+
+### Notes & Caveats
+- .23 的 400/422 同账号回落 codex 保留，兜未知形状。
+- 本地测试台实测通过（改写后请求直发 bps，工作区代码的流式中继接响应）：codex 0.153.4 和 0.157.1 的 `-i` 多图、view_image 多图、pdftotext、apply_patch；opencode 1.18.32 的 `-f` 多图、read 读图、bash、apply_patch。opencode 附带 PDF 或 read 读 PDF 的请求走 codex，结果正确。
+- opencode 自定义 provider 要在模型上声明 `attachment:true` 和 `modalities.input` 含 image，否则它会在客户端直接丢掉图片。
+
 ## [0.2.8-session-capacity-antistorm.24] - 2026-09-28
 ### Bug Fixes
 - 定位 .22 的 422 根因：**工具输出里的图片**。Codex 用 exec 的 `image()` 截图时，`custom_tool_call_output.output[]` 里带 `input_image`；bps 无视觉能力，对这类请求体直接 `422: Invalid request body.`。通用图片检测 `openAIRequestBodyMayContainImageInput` 只递归 message 的 `content`，不看工具输出的 `output`，这类请求照样改道了 bps。新增 `openAIBpsToolOutputHasImage`：function/custom 工具输出里有图片的请求留 codex 上游。

@@ -1168,6 +1168,7 @@ func openAIBpsTranslateInputItems(rawInput any, specs map[string]openAIBpsClient
 	// 工具输出条目等全部调用登记完来源后再归一（改写指引需要知道调用名）。
 	result := make([]any, 0, len(list))
 	outputs := make([]int, 0)
+	imageMessages := 0
 	for _, raw := range list {
 		item, ok := raw.(map[string]any)
 		if !ok {
@@ -1238,8 +1239,9 @@ func openAIBpsTranslateInputItems(rawInput any, specs map[string]openAIBpsClient
 			}
 			result = append(result, item)
 		case "function_call_output", "custom_tool_call_output":
+			// bps 只在 function_call_output 里收图：带图的 custom 输出换类型。
 			outputs = append(outputs, len(result))
-			result = append(result, item)
+			result = append(result, openAIBpsImageSafeToolOutput(item))
 		case "reasoning":
 			// store:false 下上游拒绝裸 reasoning 条目；带 encrypted_content 的原样
 			// 回放以维持回合间连续性。
@@ -1253,6 +1255,12 @@ func openAIBpsTranslateInputItems(rawInput any, specs map[string]openAIBpsClient
 		case "item_reference":
 			// bps 无 store，引用无从解析，丢弃。
 		default:
+			// user 消息里的图片 bps 422：拆成文本消息 + 合成 user_attachment 调用对。
+			if split := openAIBpsSplitImageMessage(item, imageMessages); len(split) > 1 {
+				imageMessages++
+				result = append(result, split...)
+				continue
+			}
 			result = append(result, item)
 		}
 	}

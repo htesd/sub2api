@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -293,11 +292,14 @@ func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account 
 	if openAIBpsExcelCanonicalModel(gjson.GetBytes(body, "model").String()) == "" {
 		return false
 	}
-	// bps 无视觉能力（ghcp 本地能力表 vision:false），图片输入请求留在 codex 上游。
-	// 通用检测只看 message content；工具输出里的图片（Codex exec 的 image() 截图）
-	// 要另查——bps 对 custom_tool_call_output 里的 input_image 直接 422（2026-09-28
-	// 生产 .22 的 502 风暴根因）。
-	if openAIRequestBodyMayContainImageInput(body) || openAIBpsToolOutputHasImage(body) {
+	// bps 只在 function_call_output 里收图（其余位置 422，见 openai_bps_excel_images.go）；
+	// user 消息与工具输出里的图片由 openAIBpsTranslateInputItems 改写进去，
+	// 改写处理不了的位置留在 codex 上游。
+	if !openAIBpsImagePlacementSupported(body) {
+		return false
+	}
+	// 文件（PDF 等）bps 在任何位置都 422，没有可用的改写。
+	if openAIBpsRequestHasFile(body) {
 		return false
 	}
 	// 客户端 function/custom 工具经 additional_tools 原生声明，但 update_plan 归一
@@ -327,35 +329,6 @@ func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account 
 		return false
 	}
 	return true
-}
-
-// openAIBpsToolOutputHasImage 报告 input 里是否有工具输出（function/custom
-// _call_output）携带图片。按字节先粗筛，没有图片标记的请求不做结构遍历。
-func openAIBpsToolOutputHasImage(body []byte) bool {
-	if !bytes.Contains(body, []byte("input_image")) && !bytes.Contains(body, []byte("image_url")) {
-		return false
-	}
-	found := false
-	gjson.GetBytes(body, "input").ForEach(func(_, item gjson.Result) bool {
-		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call_output", "custom_tool_call_output":
-		default:
-			return true
-		}
-		output := item.Get("output")
-		if !output.IsArray() {
-			return true
-		}
-		output.ForEach(func(_, part gjson.Result) bool {
-			if strings.TrimSpace(part.Get("type").String()) == "input_image" || part.Get("image_url").Exists() {
-				found = true
-				return false
-			}
-			return true
-		})
-		return !found
-	})
-	return found
 }
 
 // openAIBpsExcelToolRelayIngress 报告当前入站是否支持工具中继：只有原生

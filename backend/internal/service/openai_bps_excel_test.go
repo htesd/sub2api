@@ -156,8 +156,10 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	// 图像生成 + function 混合：responses 入站放行（function 原生声明，图像工具丢弃）。
 	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation"},{"type":"function","name":"x"}]`)))
-	// 图片输入 → codex 上游。
-	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	// user 消息图片 → 可改道（改写成合成 user_attachment 调用对，见 images 测试）。
+	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	// 改写处理不了的图片位置（assistant 消息）→ codex 上游。
+	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"assistant","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
 	// 结构化输出 → codex 上游。
 	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"text":{"format":{"type":"json_schema","name":"s","schema":{}}}`)))
