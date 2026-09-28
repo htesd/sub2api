@@ -1,3 +1,10 @@
+## [0.2.8-session-capacity-antistorm.23] - 2026-09-28
+### Bug Fixes
+- .22 上线后生产 Codex 流量在 bps 上大量 `422: Invalid request body.`（下游 502 Upstream request failed，13:39 起约 850 次/1 小时，只涉及开了 bps 的 5 个 team 号）。请求体校验失败与账号无关，旧逻辑既不 failover 也不回落，客户端重试一直撞墙。现在 bps 返回 400/422 时同账号改走 codex 上游重发一次，本请求后续尝试（含 failover 换号）不再改道。
+
+### Design Rationale
+- 先止血再定位：本地 codex/opencode 与构造探针都复现不出这个 422，只能拿生产被拒的真实请求体看。拒收时记一行结构摘要（顶层键、input 条目类型序列与键集合、工具声明类型/键，不含内容）；`/app/data/bps-reject` 目录存在时额外落盘完整请求体（0600，最多 40 个，手动建目录开启、删目录关闭）。
+
 ## [0.2.8-session-capacity-antistorm.22] - 2026-09-28
 ### Features
 - bps（Excel）上游的客户端工具改为**原生声明**：顶层 `tools` 挪进 `input` 头部的 `additional_tools` 载体（只留 function / custom / namespace，托管工具丢弃），客户端自带的 `additional_tools` 原样保留；模型直接发起客户端同名 `function_call` / `custom_tool_call`，网关不再改写。`run_officejs` 信封提取降为兜底，流式拦截只管信封、带 `functions.` 前缀的目录名与同名 `update_plan`（bps 用自己的 plan schema，仍需归一）。

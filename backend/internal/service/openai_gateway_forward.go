@@ -1125,6 +1125,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			respBody = s.redactAgentIdentitySensitiveBody(ctx, account, respBody)
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			// bps 拒收请求体（400/422）：换号无用，同账号改走 codex 上游重发一次。
+			// 与其他重试分支一致：上面的 resp.Body.Close() 已触发 headerGuard 清理。
+			if markOpenAIBpsExcelRejected(c, account, resp.StatusCode, respBody) {
+				continue
+			}
 			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
 				decoded, decodeErr := ensureReqBody()
 				if decodeErr != nil {
@@ -1417,7 +1422,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	// 账号级 Basispoints（Excel）上游选项：资格判定按请求进行（模型目录、图片输入、
 	// 结构化输出、service_tier、compact、影子账号等任一不满足即留在 codex 上游；
-	// 客户端工具在原生 responses 入站经 run_officejs 中继支持），命中后请求体重写
+	// 客户端工具经 additional_tools 原生声明；被拒收后同请求不再改道），命中后请求体重写
 	// 为 bps 白名单形状。重写失败只记日志并回落 codex 上游，不让可转发的请求因为
 	// 改道失败而报错。
 	useBpsExcel := false
@@ -1428,6 +1433,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			targetURL = openAIBpsExcelURL
 			useBpsExcel = true
 			setOpenAIBpsToolRelayContext(c, specs, scope)
+			if c != nil {
+				c.Set(openAIBpsExcelBodyContextKey, rewritten)
+			}
 		} else {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] bps excel rewrite failed, fallback to codex upstream (account: %s): %v", account.Name, rewriteErr)
 		}

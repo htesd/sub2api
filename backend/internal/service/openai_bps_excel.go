@@ -271,6 +271,10 @@ func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account 
 	if !openAIBpsExcelEnabled(account) {
 		return false
 	}
+	// 本请求的 bps 改写已被上游拒收（400/422）：后续尝试一律走 codex 上游。
+	if openAIBpsExcelRejected(c) {
+		return false
+	}
 	// 图片接口自建的 Responses 请求（强制 image_generation 工具）：调用方会在
 	// buildUpstreamRequest 之后把 URL 改回 codex 端点，改道只会产出 URL/Host/
 	// 请求体互相矛盾的请求；bps 也没有图像生成能力。
