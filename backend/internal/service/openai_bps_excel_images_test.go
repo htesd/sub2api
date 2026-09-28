@@ -134,21 +134,3 @@ func TestRewriteOpenAIBodyForBpsExcelMovesImagesIntoFunctionOutputs(t *testing.T
 		require.JSONEq(t, input[i].Raw, gjson.GetBytes(next, "input").Array()[i].Raw)
 	}
 }
-
-// 文件（PDF）bps 在任何位置都 422：带文件的请求留 codex。
-func TestOpenAIBpsIneligibleForFiles(t *testing.T) {
-	account := openAIBpsExcelTestAccount(map[string]any{OpenAIBpsExcelEnabledExtraKey: true})
-	c := openAIBpsExcelResponsesContext()
-	eligible := func(items ...string) bool {
-		return openAIBpsExcelRequestEligible(context.Background(), c, account, openAIBpsImageBody(items...))
-	}
-	file := `{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0="}`
-	call := `{"type":"function_call","call_id":"f1","name":"read","arguments":"{}"}`
-	require.False(t, eligible(`{"type":"message","role":"user","content":[{"type":"input_text","text":"read"},`+file+`]}`))
-	require.False(t, eligible(`{"role":"user","content":[`+file+`]}`))
-	require.False(t, eligible(call, `{"type":"function_call_output","call_id":"f1","output":[`+file+`]}`))
-	require.False(t, openAIBpsExcelRequestEligible(context.Background(), c, account,
-		[]byte(`{"model":"gpt-6-astra","messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0="}}]}]}`)))
-	// 文本里提到 input_file 字样不算文件。
-	require.True(t, eligible(`{"type":"message","role":"user","content":[{"type":"input_text","text":"the input_file part and \"file\" type"}]}`))
-}

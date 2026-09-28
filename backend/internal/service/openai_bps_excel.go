@@ -298,8 +298,9 @@ func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account 
 	if !openAIBpsImagePlacementSupported(body) {
 		return false
 	}
-	// 文件（PDF 等）bps 在任何位置都 422，没有可用的改写。
-	if openAIBpsRequestHasFile(body) {
+	// 文件（PDF 等）bps 在任何位置都 422：能无损翻译成文本的改写成文档块，
+	// 翻译不了的（扫描件、CID 字体、docx 等）留 codex（原生支持 PDF）。
+	if !openAIBpsFilePlacementSupported(body) {
 		return false
 	}
 	// 客户端 function/custom 工具经 additional_tools 原生声明，但 update_plan 归一

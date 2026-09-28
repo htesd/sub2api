@@ -3,18 +3,22 @@
 - bps 支持图片输入。直连 bps 实测：bps 有视觉能力（纯色图、噪声图、JPEG 都能正确识别），但只在 `function_call_output.output[]` 里收 `input_image`；放在 user 消息 content 或 `custom_tool_call_output` 里一律 `422: Invalid request body.`。.24 的"带图不改道"改为改写：
   - 带图的 `custom_tool_call_output` → `function_call_output`（call_id、output 原样；对应的 custom_tool_call 不动，实测可配对）；
   - 带图的 user 消息 → 只含文本的消息 + 合成 `user_attachment` 调用对（图片进 function_call_output），消息只有图片时补一句占位文本。
-- 资格判定由 `openAIRequestBodyMayContainImageInput`/`openAIBpsToolOutputHasImage` 改为 `openAIBpsImagePlacementSupported`：只有改写处理不了的位置（assistant/developer 消息里的图、file_id 引用、chat completions `messages` 里的图）才留 codex。
+- 资格判定由 `openAIRequestBodyMayContainImageInput`/`openAIBpsToolOutputHasImage` 改为 `openAIBpsImagePlacementSupported` + `openAIBpsFilePlacementSupported`：只有改写处理不了的位置和内容才留 codex。
 
 ### Design Rationale
 - ghcp 能力表的 `vision:false` 是它本地的保守声明，不是上游事实。
 - 合成 call_id 由"带图消息序号 + 原消息内容"sha256 派生，同一会话每轮逐字节一致；实测改写后请求连发两次，第二次 cached 22772/22839。
 - 合成调用名不进客户端目录：模型若模仿历史去调用，按目录外名字走既有的 unsupported call → 可用工具指引。
 
-- 文件（PDF 等 `input_file`）bps 不收：`file_data` 放在 user 消息、function/custom 工具输出、合成调用对里一律 422，`file_url` 会被当远程地址下载。新增 `openAIBpsRequestHasFile`，带文件的请求留 codex。.24 没拦这一类，opencode 用 read 工具读 PDF 后的请求会先撞一次 bps 422，再靠 .23 的回落走 codex。
+- 文件翻译（上行）：bps 在任何位置都不收 `input_file`（user 消息、function/custom 工具输出、合成调用对里都是 422，`file_url` 会被当远程地址下载），codex 上游原生支持 PDF。新增 `openai_bps_excel_files.go`：
+  - 能无损转成文本的文件改写成 `input_text` 文档块 `<document filename=… media_type=…>…</document>`，放在原位置（user 消息或工具输出）。支持文字型 PDF（抽取文本层）和文本类文件（txt/md/csv/json/xml/yaml/html）。
+  - 翻译不了或会丢内容的文件，整个请求留 codex：含图片 XObject 的 PDF（扫描件、图表）、Type0/CID 字体（中文 Word 导出最常见，抽出来是乱码）、可读字符占比过低、docx/xlsx、file_id/file_url、超过 32MB 或文本超过 1MB。
+  - 下行不需要反向翻译：文档块只存在于发给 bps 的历史里。客户端每轮回带原始 input_file，网关每轮重新翻译；结果按 (文件名, file_data) 的 sha256 做 LRU 缓存（上限 32MB），逐字节一致，prompt cache 不断。
+  - PDF 抽取移植自 claude-all-in-one `gw-cursor/src/pdf.rs`，零新依赖：只解 FlateDecode、取 Tj/TJ/'/" 显示串，流数量、单流和总解压量都有上限，防解压炸弹。在原版基础上加了保真判定，压缩对象流里的标记也会检查。
 
 ### Notes & Caveats
 - .23 的 400/422 同账号回落 codex 保留，兜未知形状。
-- 本地测试台实测通过（改写后请求直发 bps，工作区代码的流式中继接响应）：codex 0.153.4 和 0.157.1 的 `-i` 多图、view_image 多图、pdftotext、apply_patch；opencode 1.18.32 的 `-f` 多图、read 读图、bash、apply_patch。opencode 附带 PDF 或 read 读 PDF 的请求走 codex，结果正确。
+- 本地测试台实测通过（改写后请求直发 bps，工作区代码的流式中继接响应）：codex 0.153.4 和 0.157.1 的 `-i` 多图、view_image 多图、pdftotext、apply_patch；opencode 1.18.32 的 `-f` 多图、read 读图、bash、apply_patch。文件翻译的资格判定已用本地 opencode 的 `-f` 和 read 请求验证：文字型 PDF 和 md 走 bps，含图片的 PDF 和中文 CID 字体 PDF 留 codex。当时生产 bps 号全部失效（a13fd0 工作区在 16:35 被停用），翻译后的文档块没能在真实 bps 上端到端验证。形状只是 message 或 function_call_output 里的 input_text，这两处 bps 已确认能收。
 - opencode 自定义 provider 要在模型上声明 `attachment:true` 和 `modalities.input` 含 image，否则它会在客户端直接丢掉图片。
 
 ## [0.2.8-session-capacity-antistorm.24] - 2026-09-28

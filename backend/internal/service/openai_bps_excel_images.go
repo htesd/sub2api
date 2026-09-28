@@ -28,8 +28,8 @@ import (
 // messages）没实测过，资格判定阶段留在 codex 上游。
 //
 // 文件（PDF 等 input_file）bps 不收：file_data 放在 user 消息、function/custom
-// 工具输出、合成调用对里一律 422；file_url 会被 bps 当远程地址下载。带文件的请求
-// 留 codex 上游，没有可用的改写。
+// 工具输出、合成调用对里一律 422；file_url 会被 bps 当远程地址下载。文件改写成
+// 文本文档块见 openai_bps_excel_files.go。
 
 // openAIBpsAttachmentToolName 是承载用户消息图片的合成调用名。不在客户端工具目录里，
 // 模型若照着历史调用它，会按目录外名字处理（客户端回 unsupported call → 可用工具指引）。
@@ -193,17 +193,7 @@ func openAIBpsSplitImageMessage(item map[string]any, seq int) []any {
 	}
 }
 
-// openAIBpsRequestHasFile 报告请求里是否有文件部件（Responses 的 input_file、
-// chat completions 的 file）。按字节先粗筛；只认对象的 type 字段，文本里出现
-// "input_file" 字样不算。
-func openAIBpsRequestHasFile(body []byte) bool {
-	if !bytes.Contains(body, []byte("input_file")) && !bytes.Contains(body, []byte(`"file"`)) {
-		return false
-	}
-	return openAIBpsJSONHasFilePart(gjson.GetBytes(body, "input")) ||
-		openAIBpsJSONHasFilePart(gjson.GetBytes(body, "messages"))
-}
-
+// openAIBpsJSONHasFilePart 递归查找文件部件（只认对象 type，文本里的字样不算）。
 func openAIBpsJSONHasFilePart(value gjson.Result) bool {
 	found := false
 	switch {
