@@ -23,13 +23,14 @@ import (
 // 无降级路由。本文件把该端点实现为账号级可选上游：开了开关的账号，兼容的请求改道 bps，
 // 不兼容的请求（图片输入、结构化输出、service_tier、compact、影子账号等）仍走原
 // codex 上游——资格判定是每个请求独立进行的，开关不是"全部流量"。
-// 客户端 function/custom 工具经 run_officejs 中继支持（openai_bps_excel_tools.go），
-// 仅原生 responses 入站挂拦截改写；其余入站路径的带工具请求仍回落 codex。
+// 客户端 function/custom 工具经 input[].additional_tools 原生声明
+// （openai_bps_excel_tools.go），仅原生 responses 入站挂 update_plan 归一与信封
+// 兜底拦截；其余入站路径的带工具请求仍回落 codex。
 //
 // 线路形状依据 ghcp_proxy（github.com/Nonary/ghcp_proxy）的 excel_upstream.py 与实测：
 // - model_selection:"explicit" 是关键字段，缺了上游会按默认路由处理模型 slug；
 // - 请求体只放行白名单字段：tools / previous_response_id / reasoning 对象 / service_tier
-//   等都会被上游 422 或 403，一律不带（tools 改经 developer 消息目录 + run_officejs 中继）；
+//   等都会被上游 422 或 403，一律不带（顶层 tools 改放 input[].additional_tools）；
 // - reasoning_effort 是顶层标量（low/medium/high/xhigh），codex 的 max/ultra 档在 bps
 //   不存在，收敛到 xhigh，none/未知收敛到 medium；
 // - 响应总是 SSE（即使 stream:false），非流式客户端由既有 handleSSEToJSON 折叠；
@@ -207,8 +208,10 @@ var openAIBpsDroppableHostedToolTypes = map[string]bool{
 }
 
 // openAIBpsRequestToolsRelayable 判定请求的工具声明能否在 bps 上成立：
-// tool_choice 强制（required / 指定工具对象）无法经信封中继兑现；目录外的托管
-// 工具不能静默丢弃。tool_choice:"none" 时工具声明无效，一律放行。
+// tool_choice 强制（required / 指定工具对象）不在 bps 词汇表内（字段会被丢弃，
+// 无法保证模型一定调用）；目录外的托管工具不能静默丢弃。顶层 tools 与
+// input[].additional_tools 两个载体都检查。tool_choice:"none" 时工具声明无效，
+// 一律放行。
 func openAIBpsRequestToolsRelayable(decoded map[string]any) bool {
 	if decoded == nil {
 		return true
@@ -228,20 +231,32 @@ func openAIBpsRequestToolsRelayable(decoded map[string]any) bool {
 		// 对象形态（指定函数 / 指定托管工具，如图片接口的 image_generation）。
 		return false
 	}
-	tools, _ := decoded["tools"].([]any)
-	for _, raw := range tools {
-		tool, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		toolType, _ := tool["type"].(string)
-		toolType = strings.ToLower(strings.TrimSpace(toolType))
-		switch toolType {
-		case "function", "custom", "namespace":
-		default:
-			if !openAIBpsDroppableHostedToolTypes[toolType] {
-				return false
+	toolsRelayable := func(tools []any) bool {
+		for _, raw := range tools {
+			tool, ok := raw.(map[string]any)
+			if !ok {
+				continue
 			}
+			toolType, _ := tool["type"].(string)
+			toolType = strings.ToLower(strings.TrimSpace(toolType))
+			switch toolType {
+			case "function", "custom", "namespace":
+			default:
+				if !openAIBpsDroppableHostedToolTypes[toolType] {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	tools, _ := decoded["tools"].([]any)
+	if !toolsRelayable(tools) {
+		return false
+	}
+	for _, carrier := range openAIBpsAdditionalToolsCarriers(decoded["input"]) {
+		nested, _ := carrier["tools"].([]any)
+		if !toolsRelayable(nested) {
+			return false
 		}
 	}
 	return true
@@ -277,9 +292,9 @@ func openAIBpsExcelRequestEligible(ctx context.Context, c *gin.Context, account 
 	if openAIRequestBodyMayContainImageInput(body) {
 		return false
 	}
-	// 客户端 function/custom 工具经 run_officejs 中继支持（见 openai_bps_excel_tools.go），
-	// 但拦截改写只挂在原生 responses 入站的响应处理上；messages / chat completions
-	// 入站的转换层不认识信封，带工具的请求在那些入站仍留在 codex 上游。
+	// 客户端 function/custom 工具经 additional_tools 原生声明，但 update_plan 归一
+	// 与信封兜底只挂在原生 responses 入站的响应处理上；messages / chat completions
+	// 入站的带工具请求仍留在 codex 上游。
 	// tool_choice:"none" 与纯 image_generation 不产生中继目录，视为无工具。
 	var decodedForTools map[string]any
 	if err := json.Unmarshal(body, &decodedForTools); err != nil {
@@ -336,15 +351,25 @@ func rewriteOpenAIBodyForBpsExcel(body []byte, scope string) ([]byte, map[string
 	if stream, ok := decoded["stream"].(bool); ok {
 		out["stream"] = stream
 	}
-	// 历史条目先翻译（工具调用回放成 run_officejs 原生形状、剥掉客户端私有元数据、
-	// 滤掉裸 reasoning），再前置工具目录序言。客户端 tools 字段不上行——bps 没有
-	// tools 词汇，目录经 developer 消息注入。
+	// 历史条目先翻译（剥掉客户端私有元数据、滤掉裸 reasoning、清洗客户端自带的
+	// additional_tools、信封调用逐字节回放），再前置序言。顶层 tools 字段 bps 拒收
+	// （422），改放进 input 头部的 additional_tools 载体——bps 原生声明、模型直接
+	// 调用（见 openai_bps_excel_tools.go 文件头）。顺序：工具声明 → 序言 → 历史，
+	// 三段在同一会话内逐字节恒定，上游 prompt cache 前缀不断。
 	translatedInput, _ := openAIBpsTranslateInputItems(decoded["input"], specs, scope)
-	prologue := []any{openAIBpsMessageItem("developer", openAIBpsCatalogInstructions(specs))}
-	if reminder := openAIBpsCatalogReminder(specs); reminder != "" {
-		prologue = append(prologue, openAIBpsMessageItem("developer", reminder))
+	var head []any
+	if len(specs) > 0 {
+		if tools, ok := decoded["tools"].([]any); ok {
+			if declarations := openAIBpsNativeToolDeclarations(tools); len(declarations) > 0 {
+				head = append(head, openAIBpsAdditionalToolsItem(declarations))
+			}
+		}
 	}
-	out["input"] = append(prologue, translatedInput...)
+	head = append(head, openAIBpsMessageItem("developer", openAIBpsCatalogInstructions(specs)))
+	if reminder := openAIBpsCatalogReminder(specs); reminder != "" {
+		head = append(head, openAIBpsMessageItem("developer", reminder))
+	}
+	out["input"] = append(head, translatedInput...)
 	if instructions, ok := decoded["instructions"].(string); ok && strings.TrimSpace(instructions) != "" {
 		out["instructions"] = instructions
 	}

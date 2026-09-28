@@ -23,8 +23,10 @@ import (
 // output_item.done 拿完整条目跑 openAIBpsExtractNativeToolCall：成功则合成一组
 // 客户端形状的事件（added → delta(全量) → done → item.done）注入下行，并在
 // response.completed 里把原生条目替换掉；失败则按原生形状原样补发（客户端会回
-// "unsupported call: run_officejs"，请求侧下一轮翻译成协议重试指引，见
-// openAIBpsNormalizedToolOutput）。事件与数据两行一体的 SSE 文档里，event: 行
+// "unsupported call: run_officejs"，请求侧下一轮改写成可用工具指引，见
+// openAIBpsNormalizedToolOutput）。客户端工具原生声明后（additional_tools），
+// 受管的只剩信封兜底与 update_plan 归一，直接调用不经拦截器改写。
+// 事件与数据两行一体的 SSE 文档里，event: 行
 // 先于 data: 行到达，拦截器对受管事件族的 event: 行做一行暂存，待 data 行裁决
 // 后一并放行或丢弃。
 
@@ -151,15 +153,13 @@ func (r *openAIBpsToolStreamRelay) filterData(data string) (openAIBpsRelayAction
 		}
 		itemID := item.Get("id").String()
 		name := item.Get("name").String()
-		// 传输工具调用（待解信封）与和客户端同名的原生调用（如 update_plan，
-		// 参数 schema 要归一）都缓冲到 done 再裁决；其余原生工具调用直通——
-		// 客户端会以 "unsupported call" 报错，下一轮请求侧翻译成重试指引。
-		// 名字解析与提取/completed 改写同一规则（剥 functions. 前缀、裸名唯一匹配），
-		// 否则流式下发原生形状而 completed.output 却是客户端形状。
-		if !openAIBpsIsTransportName(name) {
-			if _, ok := openAIBpsResolveClientToolSpec(name, r.specs); !ok {
-				return openAIBpsRelayPass, nil
-			}
+		// 只有两类原生调用要缓冲到 done 再裁决：传输工具调用（待解信封，兜底）
+		// 与和客户端同名的 update_plan（bps 用自己的 plan schema，要归一）。
+		// 客户端工具已原生声明，直接调用原样直通；目录外的原生工具也直通——
+		// 客户端回 "unsupported call"，下一轮请求侧改写成可用工具指引。
+		// 判定与 completed 改写同一规则（openAIBpsRelayManagesCall）。
+		if !openAIBpsRelayManagesCall(name, r.specs) {
+			return openAIBpsRelayPass, nil
 		}
 		var skeleton map[string]any
 		if err := json.Unmarshal([]byte(item.Raw), &skeleton); err != nil || skeleton == nil {
@@ -351,6 +351,24 @@ func (r *openAIBpsToolStreamRelay) nativePassthroughLines(buffered *openAIBpsBuf
 	return lines
 }
 
+// openAIBpsRelayManagesCall 报告一个原生调用是否要经中继改写：run_officejs
+// 信封、带 functions. 显示前缀的目录工具名，或客户端目录里也有的 update_plan。
+// 其余调用（客户端工具的直接调用、目录外原生工具）原样下发。
+func openAIBpsRelayManagesCall(name string, specs map[string]openAIBpsClientToolSpec) bool {
+	if openAIBpsIsTransportName(name) {
+		return true
+	}
+	name = strings.TrimSpace(name)
+	bare := strings.TrimPrefix(name, "functions.")
+	// functions. 只是宿主显示前缀：模型偶尔把它写进调用名，客户端按裸名找工具，
+	// 命中目录的要剥掉前缀再下发。
+	if bare != "update_plan" && bare == name {
+		return false
+	}
+	_, ok := openAIBpsResolveClientToolSpec(bare, specs)
+	return ok
+}
+
 // rewriteCompletedOutput 改写 response.completed/.done 载荷：response.output 里的
 // 原生工具调用替换为客户端形状（优先用流式期间已完成提取的结果，否则就地提取）。
 // 返回改写后的载荷与是否发生变化。
@@ -391,6 +409,9 @@ func openAIBpsRewriteCompletedToolCalls(payload []byte, specs map[string]openAIB
 		}
 		itemType, _ := item["type"].(string)
 		if itemType != "function_call" && itemType != "custom_tool_call" {
+			continue
+		}
+		if name, _ := item["name"].(string); !openAIBpsRelayManagesCall(name, specs) {
 			continue
 		}
 		var clientItem map[string]any

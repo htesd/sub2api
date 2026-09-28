@@ -52,16 +52,18 @@ func TestOpenAIBpsClientToolSpecs(t *testing.T) {
 func TestOpenAIBpsCatalogInstructionsAndReminder(t *testing.T) {
 	specs := openAIBpsTestSpecs()
 	instructions := openAIBpsCatalogInstructions(specs)
+	// 原生声明协议：直接调用、禁止 run_officejs，不再注入 JSON 目录/信封格式。
+	require.Contains(t, instructions, "call them directly")
 	require.Contains(t, instructions, "run_officejs")
-	require.Contains(t, instructions, `"exec_command"`)
-	require.Contains(t, instructions, `"mcp.search"`)
-	require.Contains(t, instructions, `"namespace":"mcp"`)
+	require.Contains(t, instructions, "Client tools: apply_patch, exec_command, mcp.search.")
+	require.Contains(t, instructions, "no update_plan tool")
+	require.NotContains(t, instructions, `"arguments":{"cmd":"pwd"}`)
+	require.NotContains(t, instructions, "tools.exec_command", "有顶层 exec_command 时不提 code mode")
 
 	reminder := openAIBpsCatalogReminder(specs)
 	require.Contains(t, reminder, "exec_command")
 	require.Contains(t, reminder, "apply_patch")
-	// custom 工具提示走 input。
-	require.Contains(t, reminder, `"input":"RAW_INPUT"`)
+	require.NotContains(t, reminder, "RAW_INPUT")
 
 	// 无工具 → 外部客户端提示，无 reminder。
 	require.Equal(t, openAIBpsExternalClientInstructions, openAIBpsCatalogInstructions(nil))
@@ -254,32 +256,26 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 	require.Equal(t, "(tool call succeeded with no output)", translated[2].(map[string]any)["output"])
 	require.Equal(t, "run_officejs", origins["call_native_1"])
 
-	// 缓存未命中：按信封重合成 run_officejs 包装。
+	// 缓存未命中：客户端调用原样上行（工具已原生声明），输出 id 仍归一。
 	miss := []any{
 		map[string]any{"type": "function_call", "call_id": "call_miss", "name": "exec_command", "arguments": `{"cmd":"pwd"}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_miss", "output": "done"},
 	}
-	translated, origins = openAIBpsTranslateInputItems(miss, nil, "")
+	translated, origins = openAIBpsTranslateInputItems(miss, openAIBpsTestSpecs(), "")
 	require.Len(t, translated, 2)
-	wrapped := translated[0].(map[string]any)
-	require.Equal(t, "run_officejs", wrapped["name"])
-	var wrapArgs map[string]any
-	require.NoError(t, json.Unmarshal([]byte(wrapped["arguments"].(string)), &wrapArgs))
-	require.JSONEq(t, `{"name":"exec_command","arguments":{"cmd":"pwd"}}`, wrapArgs["code"].(string))
+	require.Equal(t, miss[0], translated[0])
 	require.Equal(t, openAIBpsFunctionItemID("call_miss"), translated[1].(map[string]any)["id"])
-	require.Equal(t, "run_officejs", origins["call_miss"])
+	require.Equal(t, "done", translated[1].(map[string]any)["output"])
+	require.NotContains(t, origins, "call_miss")
 
-	// custom 工具调用包装用 input。
+	// custom 工具调用与输出同样原样。
 	customMiss := []any{
 		map[string]any{"type": "custom_tool_call", "call_id": "call_cm", "name": "apply_patch", "input": "patch-body"},
 		map[string]any{"type": "custom_tool_call_output", "call_id": "call_cm", "output": "applied"},
 	}
-	translated, _ = openAIBpsTranslateInputItems(customMiss, nil, "")
-	wrapped = translated[0].(map[string]any)
-	require.NoError(t, json.Unmarshal([]byte(wrapped["arguments"].(string)), &wrapArgs))
-	require.JSONEq(t, `{"name":"apply_patch","input":"patch-body"}`, wrapArgs["code"].(string))
-	// 中继来源的 custom 输出改回 function_call_output。
-	require.Equal(t, "function_call_output", translated[1].(map[string]any)["type"])
+	translated, _ = openAIBpsTranslateInputItems(customMiss, openAIBpsTestSpecs(), "")
+	require.Equal(t, customMiss[0], translated[0])
+	require.Equal(t, "custom_tool_call_output", translated[1].(map[string]any)["type"])
 
 	// update_plan：调用参数还原原生 schema，输出还原 {"status":"ok"}。
 	planHistory := []any{
@@ -295,13 +291,13 @@ func TestOpenAIBpsTranslateInputItems(t *testing.T) {
 	require.Equal(t, "a", planCallArgs["plan"].([]any)[0].(map[string]any)["description"])
 	require.JSONEq(t, `{"status":"ok"}`, translated[1].(map[string]any)["output"].(string))
 
-	// 客户端对未识别 run_officejs 的报错 → 协议重试指引。
+	// 客户端对未识别 run_officejs 的报错 → 可用工具指引。
 	unsupported := []any{
 		map[string]any{"type": "function_call", "call_id": "call_un", "name": "run_officejs", "arguments": `{}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_un", "output": "Unsupported call: run_officejs(...)"},
 	}
 	translated, _ = openAIBpsTranslateInputItems(unsupported, nil, "")
-	require.Equal(t, openAIBpsTransportRetryGuidance, translated[1].(map[string]any)["output"])
+	require.Equal(t, openAIBpsUnavailableToolGuidance("run_officejs", nil), translated[1].(map[string]any)["output"])
 
 	// reasoning：裸条目丢弃，encrypted_content 保留且只留白名单字段。
 	withReasoning := []any{

@@ -136,8 +136,8 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 		"codex_fingerprint_mode":      "capacity",
 	})
 	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, capacityAccount, openAIBpsExcelBody("gpt-6-astra")))
-	// 客户端 function/custom 工具：原生 responses 入站经 run_officejs 中继放行；
-	// 无入站请求信息或 messages 入站（转换层不认识信封）仍留 codex 上游。
+	// 客户端 function/custom 工具：原生 responses 入站放行（additional_tools 原生声明）；
+	// 无入站请求信息或 messages 入站（没挂 update_plan 归一/信封兜底）仍留 codex 上游。
 	responsesCtx := openAIBpsExcelResponsesContext()
 	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"function","name":"exec_command","description":"d","parameters":{}}]`)))
@@ -153,7 +153,7 @@ func TestOpenAIBpsExcelRequestEligible(t *testing.T) {
 	// 仅图像生成工具（分组桥接注入的形状）→ 仍可改道。
 	require.True(t, openAIBpsExcelRequestEligible(context.Background(), c, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation","action":"","model":""}]`)))
-	// 图像生成 + function 混合：responses 入站放行（function 走中继，图像工具不进目录）。
+	// 图像生成 + function 混合：responses 入站放行（function 原生声明，图像工具丢弃）。
 	require.True(t, openAIBpsExcelRequestEligible(context.Background(), responsesCtx, enabled, openAIBpsExcelBody("gpt-6-astra",
 		`"tools":[{"type":"image_generation"},{"type":"function","name":"x"}]`)))
 	// 图片输入 → codex 上游。

@@ -1,3 +1,25 @@
+## [0.2.8-session-capacity-antistorm.22] - 2026-09-28
+### Features
+- bps（Excel）上游的客户端工具改为**原生声明**：顶层 `tools` 挪进 `input` 头部的 `additional_tools` 载体（只留 function / custom / namespace，托管工具丢弃），客户端自带的 `additional_tools` 原样保留；模型直接发起客户端同名 `function_call` / `custom_tool_call`，网关不再改写。`run_officejs` 信封提取降为兜底，流式拦截只管信封、带 `functions.` 前缀的目录名与同名 `update_plan`（bps 用自己的 plan schema，仍需归一）。
+- developer 序言换成"直接调用客户端工具、Excel/Office 原生工具不可用"，不再注入 JSON 目录与信封格式；客户端缺 update_plan 时明确禁止调用；Codex code mode（只有 `exec`）时提示嵌套工具要在 exec 的 JavaScript 里调。
+- 客户端对不存在工具回的 `unsupported call: X`（run_officejs、list_skills 等 bps 原生工具）改写成"X 不可用，直接调用这些客户端工具：…"，不再是"用 run_officejs 信封重试"。
+
+### Bug Fixes
+- Codex ≥0.153（GPT-6 清单）工具调用反复失败/死循环：这类请求顶层没有 tools、工具全在 `additional_tools`，旧版目录只读顶层 → 目录为空，历史里的 `exec` 调用却被重合成 run_officejs 信封，模型照着历史发信封 → 客户端回 unsupported → 网关改写成"用信封重试" → 循环（本地 codex 0.157.1 复现：13 轮后放弃）。
+- 顶层 tools 客户端（opencode、部分 Codex）的 `schema_mismatch` / `tool_not_in_catalog`：模型手写的 JSON 信封不受 schema 约束（.21 上线后生产日志 40 分钟内 58 次 `envelope_name=exec_command schema_mismatch`）；原生声明后参数由上游按 schema 约束生成。
+- 信封兜底还原 custom 工具时名字用 `spec.Key`，会把 `functions` 命名空间里的 `exec` 改名成 `functions.exec`；改为裸名 + namespace 字段（默认命名空间 `functions` 不写）。
+- `additional_tools` 里的非可丢弃托管工具同样留 codex 上游（与顶层同一规则）；`tool_choice:"none"` 时客户端载体也不上行。
+
+### Design Rationale
+- 2026-09-28 实测（测试分组 bps-test，5 个 team 号）：bps 拒收顶层 tools（422），但原生接受 `additional_tools`，function（带/不带 namespace）、custom+lark grammar（apply_patch）都能直接调用；与原生同名的 update_plan 由 bps 按自己的 schema 发出，沿用现有归一。Codex 在生产上本来就这样走通（codex_exec 0.153.4 一轮 cat/apply_patch 全部原生调用），信封中继对它纯属干扰。
+- 历史调用一律原样上行：工具已原生声明，重合成信封只会教模型发信封。命中原生缓存的（信封解出的调用）仍逐字节回放原 run_officejs 条目，保住加密思维链关联。
+- 保留信封提取作兜底而不是删掉：Excel 系统提示仍描述 run_officejs，模型偶尔会用；解得出就还原，解不出按指引自愈。
+
+### Notes & Caveats
+- 进行中的会话历史里若有旧版重合成的 run_officejs 条目（缓存命中回放），模型可能再发一两次信封，兜底仍能还原。
+- 同一轮测试中 14662 被上游吊销 token（"Your session has ended"），一次请求只收到 keepalive 挂了约 10 分钟、没有 usage/ops_error 记录——bps 路径的上游挂起超时待另查，不在本版范围。
+- 单测：新增 `openai_bps_excel_native_tools_test.go`（8 组），改写旧的信封重合成断言；`go test ./...` 全绿，`-tags=unit` 仅 4 个存量失败（另有 TestAliyunCaptchaVerifier_TransportError 偶发超时，单跑通过）。
+
 ## [0.2.8-session-capacity-antistorm.21] - 2026-09-26
 ### Bug Fixes
 - 图片接口（`/v1/images/*`）在开了 bps 的账号上被错误改道：自建请求体用 `gpt-5.6-luna` + 仅 image_generation 工具，资格判定放行后 `buildUpstreamRequest` 把请求体/Host/头改成 bps 形状，调用方随后又把 URL 改回 codex 端点，产出 URL/Host/请求体互相矛盾的请求。现在图片自建上下文（`isOpenAIImagesSelfBuiltRequest`）与对象形态 `tool_choice` 一律不改道。

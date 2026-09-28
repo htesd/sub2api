@@ -65,8 +65,8 @@ func TestOpenAIBpsTranslateReplaysTransportCallVerbatim(t *testing.T) {
 	require.Equal(t, rawArgs, call["arguments"], "原始参数必须逐字节保留")
 	require.NotContains(t, call["arguments"], `\"name\":\"run_officejs\"`)
 	require.Equal(t, openAIBpsToolTransportName, origins["call_raw_transport"])
-	// 报错仍翻译成重试指引。
-	require.Equal(t, openAIBpsTransportRetryGuidance, translated[1].(map[string]any)["output"])
+	// 报错改写成可用工具指引（不再是"用信封重试"）。
+	require.Equal(t, openAIBpsUnavailableToolGuidance("run_officejs", specs), translated[1].(map[string]any)["output"])
 
 	// functions. 前缀的传输名同理。
 	prefixed := []any{map[string]any{"type": "function_call", "call_id": "call_pref_t", "name": "functions.run_officejs", "arguments": rawArgs}}
@@ -75,25 +75,33 @@ func TestOpenAIBpsTranslateReplaysTransportCallVerbatim(t *testing.T) {
 	require.Equal(t, rawArgs, translated[0].(map[string]any)["arguments"])
 }
 
-// 目录外的原生工具调用（被直通给客户端后回传）原样回放；目录内的仍按信封重合成。
+// 历史里的工具调用一律原样上行：目录内的是原生声明的客户端工具，目录外的是
+// 被直通给客户端的 bps 原生工具（来源登记下来，报错改写成指引）。
 func TestOpenAIBpsTranslateReplaysNonCatalogNativeVerbatim(t *testing.T) {
 	specs := openAIBpsTestSpecs()
 	history := []any{
 		map[string]any{"type": "function_call", "call_id": "call_ls_native", "name": "list_skills", "arguments": `{}`},
 		map[string]any{"type": "function_call", "call_id": "call_ns_miss", "name": "search", "namespace": "mcp", "arguments": `{"q":"x"}`},
 		map[string]any{"type": "function_call", "call_id": "call_exec_miss", "name": "exec_command", "arguments": `{"cmd":"ls"}`},
+		map[string]any{"type": "function_call_output", "call_id": "call_ls_native", "output": "unsupported call: list_skills"},
+		map[string]any{"type": "function_call_output", "call_id": "call_exec_miss", "output": "ok"},
 	}
 	translated, origins := openAIBpsTranslateInputItems(history, specs, "apikey:1")
-	require.Len(t, translated, 3)
-	require.Equal(t, "list_skills", translated[0].(map[string]any)["name"])
+	require.Len(t, translated, 5)
+	require.Equal(t, history[0], translated[0])
+	require.Equal(t, history[1], translated[1])
+	require.Equal(t, history[2], translated[2])
 	require.Equal(t, "list_skills", origins["call_ls_native"])
-	// 命名空间工具按 namespace.name 查目录，属于客户端工具 → 重合成。
-	require.Equal(t, "run_officejs", translated[1].(map[string]any)["name"])
-	require.Equal(t, "run_officejs", translated[2].(map[string]any)["name"])
+	require.NotContains(t, origins, "call_ns_miss", "命名空间工具按 namespace.name 查目录，属于客户端工具")
+	require.NotContains(t, origins, "call_exec_miss")
+	guidance := translated[3].(map[string]any)["output"].(string)
+	require.Contains(t, guidance, "list_skills was not executed")
+	require.Contains(t, guidance, "exec_command")
+	require.Equal(t, "ok", translated[4].(map[string]any)["output"])
 
-	// 目录为空时无从区分，保持重合成旧行为。
-	translated, _ = openAIBpsTranslateInputItems(history[2:], nil, "apikey:1")
-	require.Equal(t, "run_officejs", translated[0].(map[string]any)["name"])
+	// 目录为空时同样原样上行（不再重合成 run_officejs 信封）。
+	translated, _ = openAIBpsTranslateInputItems(history[2:3], nil, "apikey:1")
+	require.Equal(t, history[2], translated[0])
 }
 
 func TestOpenAIBpsNativeCallCacheScopedLRU(t *testing.T) {
