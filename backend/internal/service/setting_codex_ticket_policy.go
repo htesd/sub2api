@@ -144,21 +144,27 @@ func (s *SettingService) publishCommittedCodexTicketPolicy(updates map[string]st
 func (s *SettingService) prepareCodexTicketPolicy(ctx context.Context, updates map[string]string) (map[string]string, error) {
 	keys := []string{SettingKeyOpenAICodexTicketHarvestLoopEnabled, SettingKeyOpenAICodexTicketRequiredModels}
 	touched := false
+	var missing []string
 	for _, key := range keys {
 		if _, ok := updates[key]; ok {
 			touched = true
+		} else {
+			missing = append(missing, key)
 		}
 	}
 	if !touched {
 		return nil, nil
 	}
-	values, err := s.settingRepo.GetMultiple(ctx, keys)
-	if err != nil {
-		return nil, err
-	}
 	result := map[string]string{}
-	for k, v := range values {
-		result[k] = v
+	// 只读本次未提交的策略字段；全量保存时两项都在 updates 里，无需读库。
+	if len(missing) > 0 {
+		values, err := s.settingRepo.GetMultiple(ctx, missing)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range values {
+			result[k] = v
+		}
 	}
 	for _, key := range keys {
 		if value, ok := updates[key]; ok {

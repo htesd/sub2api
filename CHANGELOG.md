@@ -1,3 +1,23 @@
+## [0.2.10-session-capacity-antistorm.26] - 2026-09-29
+### Features
+- 合并上游 v0.2.9 / v0.2.10（59 个非合并提交，无数据库迁移、无前端依赖变更）。主要内容：
+  - 新模型：Claude Sonnet 5.5（1M 上下文，默认推理 high）；OpenRouter 的 Opus 5.5 别名计费。
+  - OpenAI：透传 Responses 多代理 `OpenAI-Beta`（剔除旧 `responses=experimental`）；WS 上下文滚动时断开 previous_response 链；配额暂停保持到已知的未来重置时间；自动重置确认无额度后不再反复查询，查询失败退避；alpha search 回落成功完成才计费；Responses 探测模型缺失时不再判定为不支持。
+  - 网关：客户端断开统一记 499，不再记成 502 或 200 上游错误；合成路由的账号模型归属在新旧两套调度里都强制校验；apicompat 修复工具参数和空输出消息的流式恢复。
+  - 计费：Free Fast 无价格时保留零费用日志；账号统计按长上下文门槛计价；渠道价格未设置时沿用目录里的图片价。
+  - 管理后台：Claude 账号按需查询重置额度；风控用户白名单；分组模型白名单支持通配符；仪表盘最近用量可切换 token/金额；仅 Claude Code 的分组隐藏不支持的客户端。
+  - Antigravity：PDF 转 Gemini inlineData、MALFORMED_FUNCTION_CALL 空流触发故障转移、首包前保活。
+- 修复 `prepareCodexTicketPolicy`：全量保存设置时两个策略字段都在本次更新里，不再多读一次库，只补读本次没提交的字段。
+
+### Design Rationale
+- 冲突只有 4 个文件：VERSION、`handler/wire.go` 和 `wire_gen.go`（上游新增 `ClaudeResetCreditService`，本地新增 `SetCodexTicketSettings(settingService)`，两边参数都保留，settingService 放最后）、`AccountUsageCell.vue` 的 import（两边都保留）。
+- 上游 `openai-beta` 进了 OAuth 头白名单。bps 请求头是单独构造的，不经过白名单，已有测试断言 bps 请求里没有 OpenAI-Beta。
+- 票据策略的读库修复：设置相关的测试桩对 GetMultiple 直接 panic，panic 会让 service 包剩下的测试全部不跑。原来"TestUpdateSettings_InvalidatesBackendModeCache 失败"其实掩盖了后面 40 多个没执行的测试。修复后这些测试全部执行并通过。
+
+### Notes & Caveats
+- 测试：`go test ./...` 通过；`-tags=unit` 只剩 2 个定制版遗留失败：TestConfigKeysAreEnvReachable（门票 harvest 的 8 个配置键没注册默认值）和 TestAPIContracts（设置响应多出降智阻断/门票的 6 个字段，契约没同步）。TestBackendModeUserGuard 随读库修复一起变绿。前端 vitest 335 文件 / 2534 用例、vue-tsc、eslint、vite build 全部通过。
+- 未部署；生产仍是 .25。
+
 ## [0.2.8-session-capacity-antistorm.25] - 2026-09-28
 ### Features
 - bps 支持图片输入。直连 bps 实测：bps 有视觉能力（纯色图、噪声图、JPEG 都能正确识别），但只在 `function_call_output.output[]` 里收 `input_image`；放在 user 消息 content 或 `custom_tool_call_output` 里一律 `422: Invalid request body.`。.24 的"带图不改道"改为改写：
