@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -85,15 +84,11 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		// anchored to the client's stable conversation prefix.
 		grokCacheIdentity = resolveGrokCacheIdentity(c, body, "", upstreamModel)
 	}
-	// GPT-6.1 Sol：官方模型页明确写了"工具调用用 Responses，Chat Completions 不支持工具调用"，
-	// 所以 Chat-only 账号带工具的请求在本地直接 400，与上游 v0.2.11 一致。
-	if openai.IsGPT61SolModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) {
-		err := fmt.Errorf("gpt-6.1-sol requires Responses for tool calls; this account only supports Chat Completions")
-		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return nil, err
-	}
-	// 本分支刻意不在本地拦截 GPT-6 Sol/Luna 的"工具 + 推理"请求（上游 v0.2.8 起会直接回 400）：
-	// 官方文档写 GPT-6 支持 Chat Completions 且未说明该限制，是否支持交给上游判定，避免误伤。
+	// 本分支刻意不在本地拦截 GPT-6 Sol/Luna 的"工具 + 推理"请求和 GPT-6.1 Sol 的"工具"请求
+	// （上游 v0.2.8 / v0.2.11 会直接回 400）。走到这条 CC 直转路径的只有 APIKey 类账号：OAuth/Codex
+	// 账号不经过这里，OpenAI 官方 key 都支持 Responses。所以真正会命中的只有第三方中转。官方文档
+	// "Chat Completions 不支持工具调用"约束的是 OpenAI 自己的端点，中转可能在内部改走 Responses。
+	// 交给上游判定：上游不支持时回的 400 与本地拦截等价，支持时不误伤。
 	// 3. Rewrite model in body (no protocol conversion)
 	upstreamBody := body
 	if upstreamModel != originalModel {

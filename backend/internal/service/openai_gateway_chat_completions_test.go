@@ -1196,6 +1196,21 @@ func TestGPT6RawChatNoneToolsAreForwarded(t *testing.T) {
 	}
 }
 
+func TestGPT61SolRawChatToolsAreForwarded(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"public","reasoning_effort":"medium","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chat_1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}`))}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "fixture-key", "base_url": "https://relay.example.com", "model_mapping": map[string]any{"public": "gpt-6.1-sol"}}}
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "gpt-6.1-sol", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Len(t, gjson.GetBytes(upstream.lastBody, "tools").Array(), 1)
+}
+
 func TestGPT6UsageHTTPAndWSHaveSameCacheBreakdown(t *testing.T) {
 	response := []byte(`{"model":"gpt-6-sol","usage":{"input_tokens":1000,"output_tokens":10,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":300}}}`)
 	httpUsage, ok := extractOpenAIUsageFromJSONBytes(response)
@@ -1265,7 +1280,9 @@ func TestGPT61SolRejectsDisabledReasoningBeforeForwarding(t *testing.T) {
 		require.Error(t, validateGPT61SolCompatRequest([]byte(body), "gpt-6.1-sol"))
 		require.NoError(t, validateGPT61SolCompatRequest([]byte(body), "gpt-6-sol"))
 	}
-	for _, field := range []string{`"reasoning_effort":"none"`, `"reasoning_effort":"minimal"`, `"tools":[{"type":"function","function":{"name":"lookup"}}]`} {
+	// 本分支不在本地拦截 6.1 Sol 的 CC 工具请求（见 forwardAsRawChatCompletions 注释），
+	// 这里只验证禁用推理的拒绝；工具透传由 TestGPT61SolRawChatToolsAreForwarded 覆盖。
+	for _, field := range []string{`"reasoning_effort":"none"`, `"reasoning_effort":"minimal"`} {
 		body := []byte(`{"model":"public",` + field + `,"messages":[{"role":"user","content":"hello"}]}`)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
@@ -1306,15 +1323,14 @@ func TestGPT61SolMessagesEffortAliasesPreserveIntent(t *testing.T) {
 	}
 }
 
-func TestGPT61SolOnlyChatFallbackRejectsToolsAndDisabledReasoning(t *testing.T) {
+// 本分支只保留禁用推理的拒绝；工具请求不在本地拦截（见 forwardAsRawChatCompletions 注释）。
+func TestGPT61SolOnlyChatFallbackRejectsDisabledReasoning(t *testing.T) {
 	for _, responses := range []bool{false, true} {
 		bodies := []string{
-			`{"model":"public","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}]}`,
 			`{"model":"public","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`,
 		}
 		if responses {
 			bodies = []string{
-				`{"model":"public","input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`,
 				`{"model":"public","input":"hi","reasoning":{"effort":"none"}}`,
 			}
 		}

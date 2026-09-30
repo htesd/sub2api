@@ -7,8 +7,8 @@
   - 计费：请求在途时预留余额，防止并发透支；未定价别名按兜底模型估价。
   - API Key 创建限制：每用户最多 200 个活跃 key、每小时最多创建 60 个（0 表示不限）。生产上最多的用户只有 6 个 key，不受影响。
   - Claude Code 限制分组的 OpenAI 兼容入口改走降级分组，不再直接 403。
-- 本地 v0.2.11 冲突 6 处：`wire_gen.go`（上游 `ProvideClaudeResetCreditService` 多了幂等协调器，本地的 settingService 参数保留）、`billing_service.go`/`pricing_service.go`（两边各自新增的 GPT-6 价格注释和 6.1 Sol 价格都保留）、`openai_gateway_request_body.go`（6.1 Sol 并入 .12 的 `gpt6RequestedEffortIsNone` 判断）、`openai_gateway_chat_completions_raw.go`（见下）、VERSION。
-- Chat-only 账号 + 工具：GPT-6.1 Sol 采用上游的本地 400，官方模型页原文是"Use the Responses API for tool calling. Chat Completions is supported without tool calling."。GPT-6 Sol/Luna 保持 .12 的做法不在本地拦截，因为它们的文档没写这个限制。
+- 合并 v0.2.11 的冲突 6 处：`wire_gen.go`（上游 `ProvideClaudeResetCreditService` 多了幂等协调器，本地的 settingService 参数保留）、`billing_service.go`/`pricing_service.go`（两边各自新增的 GPT-6 价格注释和 6.1 Sol 价格都保留）、`openai_gateway_request_body.go`（6.1 Sol 并入 .12 的 `gpt6RequestedEffortIsNone` 判断）、`openai_gateway_chat_completions_raw.go`（6.1 Sol 工具拦截，见下）、VERSION。
+- Chat-only 账号 + 工具：上游 v0.2.11 在三条 CC 直转路径（chat 直转、messages→chat、responses→chat 回落）里对 6.1 Sol 带工具的请求本地回 400，本分支去掉了这三处拦截，和 .12 对 GPT-6 Sol/Luna 的处理一致。原因：只有 APIKey 类账号会走到这些路径。OAuth/Codex 账号不经过这里，OpenAI 官方 key 都支持 Responses，所以实际只会碰到第三方中转。官方文档"Chat Completions 不支持工具调用"约束的是 OpenAI 自己的端点，中转可能在内部改走 Responses。中转不支持时回的 400 和本地拦截结果一样，支持时就不会误伤。生产上这类账号有 2 个（9023、13144，都是 schedulable=false）。none/minimal 推理的拒绝保留，因为这是模型本身的限制，和走哪条路径无关。
 - 没有把 gpt-6.1-sol 加进 bps 模型名单：目前没有可用的 bps 号，无法实测 bps 是否提供这个模型。加进去而 bps 不支持的话会回 403，触发换号。
 
 ### v0.2.9 / v0.2.10 部分
