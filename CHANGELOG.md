@@ -1,5 +1,17 @@
-## [0.2.10-session-capacity-antistorm.26] - 2026-09-29
+## [0.2.11-session-capacity-antistorm.26] - 2026-09-30
 ### Features
+- 合并上游 v0.2.11（16 个非合并提交，无数据库迁移、无前端依赖变更）：
+  - **GPT-6.1 Sol**（`gpt-6.1-sol`）：模型列表、Codex 模型目录（内置官方 codex 描述符，默认推理 low，272K/872K 窗口）、别名与带推理后缀的写法、计费。价格：输入 $2、缓存读 $0.1、缓存写 $2.5、输出 $10（每百万 token）；超过 272K 输入整条请求输入/缓存 ×2、输出 ×1.5；Fast 为 2 倍。reasoning 只支持 low 到 max，none/minimal 在本地直接 400。
+  - GPT-6 Astra Ultrafast 按 6 倍 token 价计费；Codex 订阅套餐名更新为 Pro 100/200/500 和新的 Business/Enterprise/Edu 名称。
+  - Codex 客户端配置支持远程模型目录；Claude 账号可以确认后兑换原生重置额度。
+  - 计费：请求在途时预留余额，防止并发透支；未定价别名按兜底模型估价。
+  - API Key 创建限制：每用户最多 200 个活跃 key、每小时最多创建 60 个（0 表示不限）。生产上最多的用户只有 6 个 key，不受影响。
+  - Claude Code 限制分组的 OpenAI 兼容入口改走降级分组，不再直接 403。
+- 本地 v0.2.11 冲突 6 处：`wire_gen.go`（上游 `ProvideClaudeResetCreditService` 多了幂等协调器，本地的 settingService 参数保留）、`billing_service.go`/`pricing_service.go`（两边各自新增的 GPT-6 价格注释和 6.1 Sol 价格都保留）、`openai_gateway_request_body.go`（6.1 Sol 并入 .12 的 `gpt6RequestedEffortIsNone` 判断）、`openai_gateway_chat_completions_raw.go`（见下）、VERSION。
+- Chat-only 账号 + 工具：GPT-6.1 Sol 采用上游的本地 400，官方模型页原文是"Use the Responses API for tool calling. Chat Completions is supported without tool calling."。GPT-6 Sol/Luna 保持 .12 的做法不在本地拦截，因为它们的文档没写这个限制。
+- 没有把 gpt-6.1-sol 加进 bps 模型名单：目前没有可用的 bps 号，无法实测 bps 是否提供这个模型。加进去而 bps 不支持的话会回 403，触发换号。
+
+### v0.2.9 / v0.2.10 部分
 - 合并上游 v0.2.9 / v0.2.10（59 个非合并提交，无数据库迁移、无前端依赖变更）。主要内容：
   - 新模型：Claude Sonnet 5.5（1M 上下文，默认推理 high）；OpenRouter 的 Opus 5.5 别名计费。
   - OpenAI：透传 Responses 多代理 `OpenAI-Beta`（剔除旧 `responses=experimental`）；WS 上下文滚动时断开 previous_response 链；配额暂停保持到已知的未来重置时间；自动重置确认无额度后不再反复查询，查询失败退避；alpha search 回落成功完成才计费；Responses 探测模型缺失时不再判定为不支持。
@@ -10,12 +22,12 @@
 - 修复 `prepareCodexTicketPolicy`：全量保存设置时两个策略字段都在本次更新里，不再多读一次库，只补读本次没提交的字段。
 
 ### Design Rationale
-- 冲突只有 4 个文件：VERSION、`handler/wire.go` 和 `wire_gen.go`（上游新增 `ClaudeResetCreditService`，本地新增 `SetCodexTicketSettings(settingService)`，两边参数都保留，settingService 放最后）、`AccountUsageCell.vue` 的 import（两边都保留）。
+- v0.2.10 合并时冲突只有 4 个文件：VERSION、`handler/wire.go` 和 `wire_gen.go`（上游新增 `ClaudeResetCreditService`，本地新增 `SetCodexTicketSettings(settingService)`，两边参数都保留，settingService 放最后）、`AccountUsageCell.vue` 的 import（两边都保留）。
 - 上游 `openai-beta` 进了 OAuth 头白名单。bps 请求头是单独构造的，不经过白名单，已有测试断言 bps 请求里没有 OpenAI-Beta。
 - 票据策略的读库修复：设置相关的测试桩对 GetMultiple 直接 panic，panic 会让 service 包剩下的测试全部不跑。原来"TestUpdateSettings_InvalidatesBackendModeCache 失败"其实掩盖了后面 40 多个没执行的测试。修复后这些测试全部执行并通过。
 
 ### Notes & Caveats
-- 测试：`go test ./...` 通过；`-tags=unit` 只剩 2 个定制版遗留失败：TestConfigKeysAreEnvReachable（门票 harvest 的 8 个配置键没注册默认值）和 TestAPIContracts（设置响应多出降智阻断/门票的 6 个字段，契约没同步）。TestBackendModeUserGuard 随读库修复一起变绿。前端 vitest 335 文件 / 2534 用例、vue-tsc、eslint、vite build 全部通过。
+- 测试：`go test ./...` 通过；`-tags=unit` 只剩 2 个定制版遗留失败：TestConfigKeysAreEnvReachable（门票 harvest 的 8 个配置键没注册默认值）和 TestAPIContracts（设置响应多出降智阻断/门票的 6 个字段，契约没同步）。TestBackendModeUserGuard 随读库修复一起变绿。合并 v0.2.11 后：go test ./... 通过，-tags=unit 仍只剩上面 2 个遗留失败；前端 vitest 335 文件 / 2577 用例、vue-tsc、eslint、vite build 全部通过。
 - 未部署；生产仍是 .25。
 
 ## [0.2.8-session-capacity-antistorm.25] - 2026-09-28
