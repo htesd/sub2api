@@ -1,3 +1,18 @@
+## [0.2.11-session-capacity-antistorm.27] - 2026-10-03
+### Features
+- bps 出站头对齐上游 2026-10 新增的 client 校验，实现参照 cpa-plugin-oai-basispoints v0.2.10（github.com/JaxsonWang/cpa-plugin-oai-basispoints）：
+  - `x-openai-account-user-id`：每请求从账号当前 access_token 的 JWT claims（`https://api.openai.com/auth.chatgpt_account_user_id`）现取，不缓存——token 刷新后自动用新值。凭据里的 `chatgpt_user_id` 是不带 `__<uuid>` 后缀的另一形态，不能用。
+  - 静态默认头补 browser-ua 族（browser-name/ua-brands/ua-mobile/ua-platform）与 Edge WebView2 `user-agent`：此前 bps 路径不设 UA，出站是 Go 默认 `Go-http-client/1.1`，与官方 Excel 加载项形态差异太大。`accept-encoding` 固定 `identity`。
+  - 账号级捕获头 `extra.openai_bps_captured_headers`：存放从官方 Excel 加载项会话抓取的动态头，按 22 项白名单放行（user-agent、browser-ua 族、client 族、stainless 族、x-openai-account-user-id），覆盖同名静态默认值；值为 string 或 string 数组（保序），单值 32KB 上限、控制字符丢弃。身份头（authorization/account-id/auth-mode）与协议头（origin/accept/content-type/accept-encoding/cookie）不放行，token 刷新后继续发旧身份正是新版校验要抓的形态。
+
+### Design Rationale
+- 2026-10-03 生产实测（research/bps-prism-probe/probe7.py，6 个 active bps 号 × 4 种头组合）：bps 仍接受 .25 的头集（能走到 429 限流说明过了 client 校验），但封号烈度显著上升——几分钟探测即可触发 429→403 usage policy；47 个开过 bps 的号 32 个 error（token revoked / refresh 401 / usage policy，09-30 起）。头保真是目前唯一可用的缓解手段，但不能复活已被标记的号。
+- cpa 插件对无捕获 UA 的账号选择不发 UA（Go 默认会漏 `Go-http-client/1.1`）；我们选择发 WebView2 默认 UA，与既有静态 client 头同一风险敞口，可被捕获头逐账号覆盖。
+
+### Notes & Caveats
+- 测试：`go test ./...` 通过；新增覆盖：默认头新成员、JWT 两种 claims 形态与优先级（JWT 压捕获值、捕获兜底）、白名单外头丢弃、控制字符/超长值丢弃回落默认、数组保序、e2e 构建断言。
+- bps 号存量已接近枯竭（15/47 active 且多数在限流边缘），本次上线后 bps 流量取决于新号补充。
+
 ## [0.2.11-session-capacity-antistorm.26] - 2026-09-30
 ### Features
 - 合并上游 v0.2.11（16 个非合并提交，无数据库迁移、无前端依赖变更）：
