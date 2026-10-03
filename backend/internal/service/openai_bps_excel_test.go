@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -308,11 +309,107 @@ func TestApplyOpenAIBpsExcelHeaders(t *testing.T) {
 	require.Equal(t, "https://bps.openai.com", h.Get("origin"))
 	require.Equal(t, "text/event-stream", h.Get("accept"))
 	require.Equal(t, "application/json", h.Get("content-type"))
+	// 2026-10 client 校验对齐：WebView2 UA、browser-ua 族、固定 accept-encoding。
+	require.Contains(t, h.Get("user-agent"), "Edg/140.0.0.0")
+	require.Equal(t, "Edge", h.Get("x-openai-internal-basispoints-browser-name"))
+	require.Equal(t, `"Windows"`, h.Get("x-openai-internal-basispoints-browser-ua-platform"))
+	require.Equal(t, "?0", h.Get("x-openai-internal-basispoints-browser-ua-mobile"))
+	require.Equal(t, "identity", h.Get("accept-encoding"))
+	// 无账号凭据时不发 account-user-id，也不发捕获头专有的 runtime-version。
+	require.Empty(t, h.Get("x-openai-account-user-id"))
+	require.Empty(t, h.Get("x-stainless-runtime-version"))
 
 	h2 := http.Header{}
 	applyOpenAIBpsExcelHeaders(h2, nil, false)
 	require.Equal(t, "application/json", h2.Get("accept"))
 	require.Empty(t, h2.Get("x-openai-account-id"))
+}
+
+// bpsTestJWT 拼一个只用于测试的伪 JWT（签名无效，仅 payload 可读）。
+func bpsTestJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	enc := base64.RawURLEncoding
+	return enc.EncodeToString([]byte(`{"alg":"none"}`)) + "." + enc.EncodeToString(raw) + ".sig"
+}
+
+// TestApplyOpenAIBpsExcelHeadersAccountUserID 验证 x-openai-account-user-id 的
+// 取值链：JWT claims（含 https://api.openai.com/auth 命名空间）现取优先，
+// 捕获头仅在 JWT 缺失时兜底；凭据里的 chatgpt_user_id（无 __ 后缀形态）不参与。
+func TestApplyOpenAIBpsExcelHeadersAccountUserID(t *testing.T) {
+	full := "user-abc123__95354fb3-6cc3-4244-834c-d1b22ad3ecf1"
+	account := openAIBpsExcelTestAccount(nil)
+	account.Credentials = map[string]any{
+		"access_token": bpsTestJWT(t, map[string]any{
+			"https://api.openai.com/auth": map[string]any{"chatgpt_account_user_id": full},
+		}),
+		"chatgpt_user_id": "user-abc123",
+	}
+	h := http.Header{}
+	applyOpenAIBpsExcelHeaders(h, account, true)
+	require.Equal(t, full, h.Get("x-openai-account-user-id"))
+
+	// 顶层 claims 形态也认。
+	account.Credentials["access_token"] = bpsTestJWT(t, map[string]any{"chatgpt_account_user_id": "user-top"})
+	h = http.Header{}
+	applyOpenAIBpsExcelHeaders(h, account, true)
+	require.Equal(t, "user-top", h.Get("x-openai-account-user-id"))
+
+	// JWT 无 claim 时捕获头兜底；JWT 有值时压过捕获值。
+	account.Credentials["access_token"] = "not-a-jwt"
+	account.Extra = map[string]any{OpenAIBpsExcelCapturedHeadersExtraKey: map[string]any{
+		"X-OpenAI-Account-User-ID": "user-captured",
+	}}
+	h = http.Header{}
+	applyOpenAIBpsExcelHeaders(h, account, true)
+	require.Equal(t, "user-captured", h.Get("x-openai-account-user-id"))
+
+	account.Credentials["access_token"] = bpsTestJWT(t, map[string]any{
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_user_id": full},
+	})
+	h = http.Header{}
+	applyOpenAIBpsExcelHeaders(h, account, true)
+	require.Equal(t, full, h.Get("x-openai-account-user-id"))
+}
+
+// TestApplyOpenAIBpsExcelHeadersCaptured 验证账号级捕获头：白名单内覆盖同名默认头、
+// 白名单外（身份/协议/Cookie）一律丢弃、控制字符与超长值丢弃、数组保序。
+func TestApplyOpenAIBpsExcelHeadersCaptured(t *testing.T) {
+	longValue := strings.Repeat("a", openAIBpsMaxCapturedHeaderValue+1)
+	account := openAIBpsExcelTestAccount(map[string]any{
+		OpenAIBpsExcelCapturedHeadersExtraKey: map[string]any{
+			"User-Agent": "Mozilla/5.0 real-capture",
+			"X-OpenAI-Internal-Basispoints-Browser-Name": "Chrome",
+			"X-Stainless-Runtime-Version":                "v22.17.0",
+			"X-Stainless-OS":                             []any{"macOS", "macOS-dup", ""},
+			"Authorization":                              "Bearer evil",
+			"X-OpenAI-Account-ID":                        "acct-evil",
+			"X-Basispoints-Auth-Mode":                    "apikey",
+			"Cookie":                                     "session=evil",
+			"Origin":                                     "https://evil.example",
+			"X-Not-In-List":                              "nope",
+			"X-Stainless-Arch":                           "bad\nvalue",
+			"X-Stainless-Lang":                           longValue,
+		},
+	})
+	h := http.Header{}
+	h.Set("chatgpt-account-id", "acct-real")
+	applyOpenAIBpsExcelHeaders(h, account, true)
+
+	require.Equal(t, "Mozilla/5.0 real-capture", h.Get("user-agent"))
+	require.Equal(t, "Chrome", h.Get("x-openai-internal-basispoints-browser-name"))
+	require.Equal(t, "v22.17.0", h.Get("x-stainless-runtime-version"))
+	require.Equal(t, []string{"macOS", "macOS-dup"}, h.Values("X-Stainless-OS"))
+	// 身份头与协议头不受捕获影响。
+	require.Equal(t, "acct-real", h.Get("x-openai-account-id"))
+	require.Equal(t, "chatgpt", h.Get("x-basispoints-auth-mode"))
+	require.Empty(t, h.Get("cookie"))
+	require.Equal(t, "https://bps.openai.com", h.Get("origin"))
+	require.Empty(t, h.Get("x-not-in-list"))
+	// 控制字符/超长值被丢弃后回落到静态默认值。
+	require.Equal(t, "unknown", h.Get("x-stainless-arch"))
+	require.Equal(t, "js", h.Get("x-stainless-lang"))
 }
 
 // TestBuildUpstreamRequestBpsExcel 走 buildUpstreamRequest 全函数验证 bps 改道后的
@@ -346,6 +443,10 @@ func TestBuildUpstreamRequestBpsExcel(t *testing.T) {
 	require.Equal(t, "chatgpt", req.Header.Get("x-basispoints-auth-mode"))
 	require.Equal(t, "https://bps.openai.com", req.Header.Get("origin"))
 	require.Equal(t, "text/event-stream", req.Header.Get("accept"))
+	require.Equal(t, "identity", req.Header.Get("accept-encoding"))
+	require.Contains(t, req.Header.Get("user-agent"), "Edg/140.0.0.0")
+	// 该账号无 access_token 凭据：不发 account-user-id。
+	require.Empty(t, req.Header.Get("x-openai-account-user-id"))
 	// codex 客户端身份链一律不出现。
 	for _, absent := range []string{"originator", "x-codex-turn-state", "version", "session_id", "OpenAI-Beta"} {
 		require.Empty(t, req.Header.Get(absent), "header %s must not be sent to bps", absent)

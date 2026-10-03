@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,12 @@ import (
 // - bps 不使用 turn-state 门票，也不回 X-Codex-Safety-Buffering-* 头，打票注入与
 //   降智观察头在该端点上自然空转；降智阻断按响应模型判定的逻辑不受影响（bps 实得模型
 //   与请求一致，不会误触发）。
+//
+// 2026-10 上游对 bps 新增 client 校验：静态身份头之外还要看会话级动态头
+// （x-openai-account-user-id、user-agent、browser-ua 族等）。实现对齐
+// cpa-plugin-oai-basispoints v0.2.10：user-id 每请求从 access_token 的 JWT 现取
+// （token 刷新后自动用新值），账号可通过 extra.openai_bps_captured_headers
+// 配置真实会话捕获头，按白名单覆盖同名静态默认头。
 
 const (
 	openAIBpsExcelURL              = "https://bps.openai.com/basispoints/api/responses"
@@ -45,6 +52,12 @@ const (
 
 	// OpenAIBpsExcelEnabledExtraKey 是 accounts.extra 上的账号级开关键。
 	OpenAIBpsExcelEnabledExtraKey = "openai_bps_excel_enabled"
+
+	// OpenAIBpsExcelCapturedHeadersExtraKey 是 accounts.extra 上的账号级捕获头对象：
+	// 存放从官方 Excel 加载项会话抓取的动态请求头（user-agent、browser-ua 族、
+	// x-stainless-runtime-version 等），按白名单放行后覆盖同名的静态默认头。
+	// 与 cpa-plugin-oai-basispoints v0.2.10 的 captured_headers 字段同语义。
+	OpenAIBpsExcelCapturedHeadersExtraKey = "openai_bps_captured_headers"
 )
 
 // openAIBpsUsedContextKey 记录当前转发尝试是否走了 bps 上游，
@@ -66,7 +79,9 @@ var openAIBpsExcelModels = map[string]bool{
 	"gpt-5.6-luna":  true,
 }
 
-// bps 出站身份头：与官方 Excel 加载项保持一致（ghcp excel_upstream.py 的默认集）。
+// bps 出站身份头：与官方 Excel 加载项保持一致（ghcp excel_upstream.py 的默认集，
+// 2026-10 补 browser-ua 族与 WebView2 UA，对齐 cpa-plugin-oai-basispoints v0.2.10
+// 在新版 client 校验下的默认形态）。同名头可被账号级捕获头覆盖。
 var openAIBpsExcelClientHeaders = map[string]string{
 	"x-basispoints-auth-mode":                             "chatgpt",
 	"x-openai-internal-basispoints-client-agent-profile":  "excel",
@@ -78,13 +93,52 @@ var openAIBpsExcelClientHeaders = map[string]string{
 	"x-openai-internal-basispoints-client-runtime":        "desktop",
 	"x-openai-internal-basispoints-office-host":           "Excel",
 	"x-openai-internal-basispoints-office-platform":       "PC",
-	"x-stainless-arch":                                    "unknown",
-	"x-stainless-lang":                                    "js",
-	"x-stainless-os":                                      "Unknown",
-	"x-stainless-package-version":                         "6.31.0",
-	"x-stainless-retry-count":                             "0",
-	"x-stainless-runtime":                                 "browser:chrome",
+	"x-openai-internal-basispoints-browser-name":          "Edge",
+	"x-openai-internal-basispoints-browser-ua-brands":     `"Microsoft Edge";v="140", "Chromium";v="140", "Not=A?Brand";v="24"`,
+	"x-openai-internal-basispoints-browser-ua-mobile":     "?0",
+	"x-openai-internal-basispoints-browser-ua-platform":   `"Windows"`,
+	"x-stainless-arch":            "unknown",
+	"x-stainless-lang":            "js",
+	"x-stainless-os":              "Unknown",
+	"x-stainless-package-version": "6.31.0",
+	"x-stainless-retry-count":     "0",
+	"x-stainless-runtime":         "browser:chrome",
+	// 官方加载项跑在 Edge WebView2 里；缺省不能裸发 Go-http-client/1.1。
+	"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
 }
+
+// openAIBpsCapturedHeaderAllowlist 是捕获头白名单（小写名）：只有真实会话里会变的
+// 客户端/浏览器/运行时头允许从账号 extra 进入上游。身份头（authorization、
+// chatgpt-account-id、x-openai-account-id、x-basispoints-auth-mode）与协议头
+// （accept、content-type、origin、accept-encoding、cookie）一律不放行——
+// token 刷新后继续发旧身份正是新版校验要抓的形态。与 cpa 插件白名单一致。
+var openAIBpsCapturedHeaderAllowlist = map[string]bool{
+	"user-agent":                                          true,
+	"x-openai-account-user-id":                            true,
+	"x-openai-internal-basispoints-browser-name":          true,
+	"x-openai-internal-basispoints-browser-ua-brands":     true,
+	"x-openai-internal-basispoints-browser-ua-mobile":     true,
+	"x-openai-internal-basispoints-browser-ua-platform":   true,
+	"x-openai-internal-basispoints-client-agent-profile":  true,
+	"x-openai-internal-basispoints-client-editor":         true,
+	"x-openai-internal-basispoints-client-host":           true,
+	"x-openai-internal-basispoints-client-platform":       true,
+	"x-openai-internal-basispoints-client-platform-class": true,
+	"x-openai-internal-basispoints-client-product":        true,
+	"x-openai-internal-basispoints-client-runtime":        true,
+	"x-openai-internal-basispoints-office-host":           true,
+	"x-openai-internal-basispoints-office-platform":       true,
+	"x-stainless-arch":                                    true,
+	"x-stainless-lang":                                    true,
+	"x-stainless-os":                                      true,
+	"x-stainless-package-version":                         true,
+	"x-stainless-retry-count":                             true,
+	"x-stainless-runtime":                                 true,
+	"x-stainless-runtime-version":                         true,
+}
+
+// openAIBpsMaxCapturedHeaderValue 是单个捕获头值的长度上限（与 cpa 插件一致）。
+const openAIBpsMaxCapturedHeaderValue = 32768
 
 // openAIBpsToolRelayContextKey 存放本次转发尝试的客户端工具目录（仅 responses 入站
 // 且声明了工具时有值）；响应侧的 run_officejs 拦截改写按它还原客户端调用。
@@ -527,12 +581,25 @@ func openAIBpsExcelTurnState(decoded map[string]any, inputItems []any) (string, 
 // applyOpenAIBpsExcelHeaders 设置 bps 端点要求的身份与客户端头。
 // Authorization 已由 buildOpenAIAuthenticationHeaders 设置；chatgpt-account-id 由
 // resolveAndSetOpenAIChatGPTAccountHeaders 设置，这里镜像出 x-openai-account-id。
+// 2026-10 上游新增 client 校验后对齐 cpa-plugin-oai-basispoints v0.2.10：
+// 静态默认头 → 账号级捕获头（白名单内覆盖同名默认）→ JWT 现取的
+// x-openai-account-user-id 优先于捕获值；协议头（origin/accept/content-type/
+// accept-encoding）固定生成，不允许捕获头覆盖。
 func applyOpenAIBpsExcelHeaders(header http.Header, account *Account, isStream bool) {
 	if accountID := strings.TrimSpace(header.Get("chatgpt-account-id")); accountID != "" {
 		header.Set("x-openai-account-id", accountID)
 	}
 	for key, value := range openAIBpsExcelClientHeaders {
 		header.Set(key, value)
+	}
+	for name, values := range openAIBpsCapturedHeaders(account) {
+		header.Del(name)
+		for _, value := range values {
+			header.Add(name, value)
+		}
+	}
+	if userID := openAIBpsAccountUserID(account); userID != "" {
+		header.Set("x-openai-account-user-id", userID)
 	}
 	header.Set("origin", "https://"+openAIBpsExcelHost)
 	if isStream {
@@ -541,4 +608,75 @@ func applyOpenAIBpsExcelHeaders(header http.Header, account *Account, isStream b
 		header.Set("accept", "application/json")
 	}
 	header.Set("content-type", "application/json")
+	header.Set("accept-encoding", "identity")
+}
+
+// openAIBpsAccountUserID 从账号当前 access_token 的 JWT claims 现取
+// chatgpt_account_user_id（不缓存：token 刷新后值会变，cpa 插件同样每次执行现读）。
+// 凭据里的 chatgpt_user_id 是不带 "__<uuid>" 后缀的另一形态，不能直接当头值用。
+func openAIBpsAccountUserID(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	token := strings.TrimSpace(account.GetCredential("access_token"))
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	claims := gjson.ParseBytes(payload)
+	if v := strings.TrimSpace(claims.Get(`https://api\.openai\.com/auth.chatgpt_account_user_id`).String()); v != "" {
+		return v
+	}
+	return strings.TrimSpace(claims.Get("chatgpt_account_user_id").String())
+}
+
+// openAIBpsCapturedHeaders 读取账号级捕获头（extra.openai_bps_captured_headers）：
+// 白名单过滤、单值 32KB 上限、拒绝控制字符；非法项静默丢弃（这里不是凭据解析
+// 路径，不能把服务请求打挂）。值为 string 或 []string（保留非空项与原顺序），
+// 与 cpa 插件的 captured_headers 同形。
+func openAIBpsCapturedHeaders(account *Account) map[string][]string {
+	if account == nil || account.Extra == nil {
+		return nil
+	}
+	raw, ok := account.Extra[OpenAIBpsExcelCapturedHeadersExtraKey].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string][]string{}
+	for name, value := range raw {
+		canonical := strings.ToLower(strings.TrimSpace(name))
+		if !openAIBpsCapturedHeaderAllowlist[canonical] {
+			continue
+		}
+		var values []string
+		switch v := value.(type) {
+		case string:
+			values = []string{v}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					values = append(values, s)
+				}
+			}
+		default:
+			continue
+		}
+		validated := make([]string, 0, len(values))
+		for _, v := range values {
+			v = strings.TrimSpace(v)
+			if v == "" || len(v) > openAIBpsMaxCapturedHeaderValue ||
+				strings.IndexFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+				continue
+			}
+			validated = append(validated, v)
+		}
+		if len(validated) > 0 {
+			out[canonical] = validated
+		}
+	}
+	return out
 }
