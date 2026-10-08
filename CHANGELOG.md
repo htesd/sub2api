@@ -1,3 +1,22 @@
+## [0.2.14-session-capacity-antistorm.28] - 2026-10-08
+### Features
+- 合并上游 v0.2.12–v0.2.14（31 个非合并提交）：
+  - 安全修复：全新安装不再生成可猜测的管理员凭据（#7850，只影响首次安装，已有部署不受影响）；EasyPay 伪造回调签名复用（#7881）；邮箱验证码尝试次数原子化、重置 token 哈希化且只能用一次；匿名订单查询加限流；Antigravity 上游错误体脱敏后再返回。
+  - 计费：API Key 在计费完成前被删除时仍然结算；TypeSafe API-key 账号允许上游计费探测。
+  - 新平台 TypeSafe Jev System One（迁移 241_add_typesafe_platform）；充值赠送和折扣阶梯（241_add_payment_order_bonus_amount）；远程 Codex 模型目录支持 API-key 发现；Grok CLI 身份头对齐官方；后台账号优先级快捷调整；API Key 支持按分组排序。
+  - 前端依赖安全升级：axios 1.20.0、vue 3.5.43、source-map-js ≥1.2.2。
+- 降智观察补两列（迁移 239y）：`usage_logs.upstream_turn_state_len`（上游 x-codex-turn-state 长度）和 `usage_logs.upstream_safety_buffering`（X-Codex-Safety-Buffering-Enabled）。和 upstream_faster_model 在同一个观察点记录，只观察，不改变转发、换号或计费。
+
+### Design Rationale
+- 10-08 用户追问"不带降级头的请求拿到的是什么票"，这个问题答不上来，因为网关从来没记过 turn-state 长度。直连上游可以看到 `x-codex-safety-buffering-enabled: true`，但网关只记了 faster-model。这次两个都落库，之后可以直接按号、按时段、按票长度统计。
+- 两列都可空：没有响应头就写 NULL，不臆测；safety-buffering 的值无法识别时也写 NULL。没有提供后台展示，只用于 SQL 分析，这样读路径（select/scan）保持不变。
+- bps 通道在 10-03 03:48 已被上游全局 403（cpa 插件 issue #27，仓库已归档）。.27 的请求头改造保留，但 10-08 已关闭全部 47 个号的 bps 开关。
+
+### Notes & Caveats
+- 两个迁移都是 ADD COLUMN IF NOT EXISTS（可空、无默认值），只改元数据，不重写大表。
+- 测试：后端 `go test -tags=unit ./...` 只剩两个存量失败（TestConfigKeysAreEnvReachable、TestAPIContracts）；前端 `pnpm build`（含 vue-tsc 和 i18n 检查）通过。vitest 有 6 个失败，上游 v0.2.14 原样也是同样 6 个失败（TypeSafe 加了第 6 个平台、Codex 配置模板变了，测试没跟着改），不是这次合并引入的。
+- frontend/node_modules 不再软链到 capacity-025，改为本仓库自己用 pnpm 安装（新依赖版本需要）。
+
 ## [0.2.11-session-capacity-antistorm.27] - 2026-10-03
 ### Features
 - bps 出站头对齐上游 2026-10 新增的 client 校验，实现参照 cpa-plugin-oai-basispoints v0.2.10（github.com/JaxsonWang/cpa-plugin-oai-basispoints）：
