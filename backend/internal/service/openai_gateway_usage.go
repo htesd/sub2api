@@ -389,6 +389,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		UpstreamResponseModel:    optionalTrimmedStringPtr(result.UpstreamResponseModel),
 		UpstreamModelMismatch:    upstreamModelMismatch(sentModel, result.UpstreamResponseModel),
 		UpstreamFasterModel:      optionalTrimmedStringPtr(result.UpstreamFasterModel),
+		UpstreamTurnStateLen:     optionalPositiveIntPtr(result.UpstreamTurnStateLen),
+		UpstreamSafetyBuffering:  cloneBoolPtr(result.UpstreamSafetyBuffering),
 		ServiceTier:              result.ServiceTier,
 		ReasoningEffort:          result.ReasoningEffort,
 		RequestedReasoningEffort: coalesceRequestedReasoningEffort(result.RequestedReasoningEffort, result.ReasoningEffort),

@@ -42,3 +42,19 @@ func optionalInt64Ptr(v int64) *int64 {
 	}
 	return &v
 }
+
+// optionalPositiveIntPtr 把"0 或负数=没有"的观察值转成可空列。
+func optionalPositiveIntPtr(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	return &v
+}
+
+func cloneBoolPtr(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	b := *v
+	return &b
+}

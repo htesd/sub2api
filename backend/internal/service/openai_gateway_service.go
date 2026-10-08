@@ -255,6 +255,10 @@ type OpenAIForwardResult struct {
 	// UpstreamFasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（上游自报本轮
 	// 换成的更快模型），只观察记录，见 openai_upstream_faster_model.go。
 	UpstreamFasterModel string
+	// UpstreamSafetyBuffering 是上游 X-Codex-Safety-Buffering-Enabled 响应头（nil=没有该头）；
+	// UpstreamTurnStateLen 是上游 x-codex-turn-state 响应头长度（0=没有该头）。只观察记录。
+	UpstreamSafetyBuffering *bool
+	UpstreamTurnStateLen    int
 	// UpstreamResponseServiceTier is the tier the upstream reports having used
 	// (response service_tier: "priority" / "default" / "flex" / ...); "" when not declared.
 	UpstreamResponseServiceTier string

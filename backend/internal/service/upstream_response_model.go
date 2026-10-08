@@ -40,6 +40,10 @@ type upstreamResponseModelObserver struct {
 	// fasterModel 是上游 X-Codex-Safety-Buffering-Faster-Model 响应头的值（上游自己标记
 	// 本轮换成了哪个更快的模型）。只观察记录，不参与转发与计费，见 openai_upstream_faster_model.go。
 	fasterModel string
+	// safetyBuffering 是 X-Codex-Safety-Buffering-Enabled 响应头（nil=没有该头）；
+	// turnStateLen 是 x-codex-turn-state 响应头的长度（0=没有该头）。同样只观察记录。
+	safetyBuffering *bool
+	turnStateLen    int
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {

@@ -665,6 +665,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			UpstreamModel:                 mappedModel,
 			UpstreamResponseModel:         responseModelObserver.Model(),
 			UpstreamFasterModel:           responseModelObserver.FasterModel(),
+			UpstreamSafetyBuffering:       responseModelObserver.SafetyBuffering(),
+			UpstreamTurnStateLen:          responseModelObserver.TurnStateLen(),
 			UpstreamResponseModelConflict: responseModelObserver.Conflict(),
 			UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
 			ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(body)),

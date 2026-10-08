@@ -101,3 +101,50 @@ func TestObserveOpenAIUpstreamFasterModelSurvivesLaterObserverLookup(t *testing.
 	beginUpstreamResponseModelObservation(c)
 	require.Empty(t, observedUpstreamFasterModel(c))
 }
+
+func TestObserveOpenAIFasterModelHeaderRecordsTurnSignals(t *testing.T) {
+	observer := &upstreamResponseModelObserver{}
+	header := http.Header{}
+	header.Set(openAICodexSafetyBufferingModelHeader, "gpt-6-luna")
+	header.Set(openAICodexSafetyBufferingEnabledHeader, "true")
+	header.Set(openAICodexTurnStateHeader, strings.Repeat("g", 780))
+	observer.ObserveOpenAIFasterModelHeader(&Account{ID: 1}, "gpt-6-astra", header)
+	require.Equal(t, 780, observer.TurnStateLen())
+	require.NotNil(t, observer.SafetyBuffering())
+	require.True(t, *observer.SafetyBuffering())
+
+	// 下一次上游响应没有这些头：覆盖为"没有"，不能残留上一次的值。
+	off := http.Header{}
+	off.Set(openAICodexSafetyBufferingEnabledHeader, "False")
+	observer.ObserveOpenAIFasterModelHeader(&Account{ID: 2}, "gpt-6-astra", off)
+	require.Equal(t, 0, observer.TurnStateLen())
+	require.NotNil(t, observer.SafetyBuffering())
+	require.False(t, *observer.SafetyBuffering())
+
+	observer.ObserveOpenAIFasterModelHeader(&Account{ID: 3}, "gpt-6-astra", http.Header{})
+	require.Nil(t, observer.SafetyBuffering(), "missing header stays NULL")
+
+	unknown := http.Header{}
+	unknown.Set(openAICodexSafetyBufferingEnabledHeader, "maybe")
+	observer.ObserveOpenAIFasterModelHeader(&Account{ID: 4}, "gpt-6-astra", unknown)
+	require.Nil(t, observer.SafetyBuffering(), "unrecognized value is not guessed")
+
+	var nilObserver *upstreamResponseModelObserver
+	require.Nil(t, nilObserver.SafetyBuffering())
+	require.Equal(t, 0, nilObserver.TurnStateLen())
+}
+
+func TestObservedTurnSignalsFlowFromContext(t *testing.T) {
+	svc := newFasterModelTestService(map[string]string{SettingKeyOpenAICodexDowngradeObserveEnabled: "true"})
+	c := newFasterModelTestContext()
+	header := http.Header{}
+	header.Set(openAICodexSafetyBufferingEnabledHeader, "true")
+	header.Set(openAICodexTurnStateHeader, strings.Repeat("g", 292))
+	svc.observeOpenAIUpstreamFasterModel(context.Background(), c, &Account{ID: 7}, "gpt-6-astra", header)
+	require.Equal(t, 292, observedUpstreamTurnStateLen(c))
+	require.NotNil(t, observedUpstreamSafetyBuffering(c))
+	require.True(t, *observedUpstreamSafetyBuffering(c))
+
+	require.Nil(t, optionalPositiveIntPtr(0))
+	require.Equal(t, 292, *optionalPositiveIntPtr(292))
+}

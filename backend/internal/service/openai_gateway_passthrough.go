@@ -527,6 +527,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		UpstreamModel:                 upstreamPassthroughModel,
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
 		UpstreamFasterModel:           observedUpstreamFasterModel(c),
+		UpstreamSafetyBuffering:       observedUpstreamSafetyBuffering(c),
+		UpstreamTurnStateLen:          observedUpstreamTurnStateLen(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
 		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
