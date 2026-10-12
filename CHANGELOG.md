@@ -1,3 +1,21 @@
+## [0.2.14-session-capacity-antistorm.32] - 2026-10-13
+### Features
+- 从上游 v0.2.15 摘取 Grok 相关的 4 个提交（cherry-pick -x，保留上游作者）：
+  - #7775 `3613174cf` + `27f4a1780`：Grok `/v1/responses` 流如果以空的 `response.completed` 结束（没有输出、没有 usage、也没有错误，即上游静默拒答），改为自动切号重试，不再当成一次成功的空回合返回给客户端。原来这层保护只对 PlatformOpenAI 生效。
+  - #7887 `54810f8c8`：Grok SSO 设备授权的同意请求带上同意页里的隐藏字段 `consent_token`，以及 Origin / Referer。xAI 改版后不带这些字段，SSO 导入号会失败。
+  - #7869 `412718edf`：Anthropic 格式输出的 thinking 块始终带 `signature` 键，流式 `content_block_start` 里是空串。Grok Build 这类严格客户端缺这个键会报 "missing field `signature`" 并中断。
+
+### Design Rationale
+- 只摘 Grok 相关的提交，不整版合并 v0.2.15。整版会带进平台白名单重构、迁移 242（删除平台 CHECK 约束）、Cline / Command Code 新平台，试算在 `openai_gateway_forward.go` 有真冲突，风险和这次的需求不成比例。
+- 用 `-x` 在提交信息里记下上游 SHA。以后整版合并 v0.2.15 时，git 会把这几处识别为相同改动。
+- 上一个提交把 .29–.31 一直没提交的线上源码先归档了，保证 .32 的 diff 只包含这 4 个上游提交。
+
+### Notes & Caveats
+- #7869 对所有走 Anthropic 兼容输出的平台都生效，不只 Grok：thinking 块从「没有 signature 键」变成 `"signature": ""`。回传时空串和缺键在反序列化后是同一个值，`TestAnthropicToResponses_ThinkingWithoutSignatureIgnored` 覆盖了这一点。
+- 和 10-13 排查出的 14184 号 402 问题无关。那次是账号 base_url 配置问题，已经在线上改账号配置解决，不涉及代码。遗留风险仍在：免费 Grok 号的媒体请求会固定走 api.x.ai，会吃 402，然后被锁到周窗口结束。这次没有处理。
+- 测试：`go test -tags=unit ./...` 只剩两个存量失败（TestConfigKeysAreEnvReachable、TestAPIContracts）。新增的上游用例 TestOpenAIResponsesEmptyCompletedFailsOverGrok、TestSSOConsentToken、TestAnthropicContentBlock_ThinkingAlwaysHasSignature 等全部通过。
+- 前端没有改动，部署时沿用 .31 的 dist。
+
 ## [0.2.14-session-capacity-antistorm.31] - 2026-10-10
 ### Features
 - session 指纹模式新增会话池与子代理挂载，由账号级 `extra.codex_fingerprint_sessions`（整数，缺省 1 = 旧行为，上限 64）开启。开启后：
