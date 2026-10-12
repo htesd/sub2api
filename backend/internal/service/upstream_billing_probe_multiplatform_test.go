@@ -237,27 +237,30 @@ func TestUpstreamBillingProbeOfficialAPIHostMatchingIsNormalized(t *testing.T) {
 	require.False(t, upstreamBillingProbeTargetIsOfficialAPI("https://deepseek.example.com"))
 }
 
-// OpenAI 语义保持不变：无自定义 base 时仍探官方域，且沿用 openai 传输画像。
-func TestUpstreamBillingProbeOpenAIDefaultBaseURLPreserved(t *testing.T) {
-	account := &Account{
-		ID:          17,
-		Platform:    PlatformOpenAI,
-		Type:        AccountTypeAPIKey,
-		Status:      StatusActive,
-		Credentials: map[string]any{"api_key": "sk-openai"},
-	}
-	repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       upstreamBillingProbeValidBody(),
-	}}
-	svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
+// OpenAI 无自定义 base（或指向官方域）时不再请求 api.openai.com/v1/sub2api/billing：
+// 路径里带 "sub2api"，会向官方暴露网关身份；与其他平台一样直接记 unsupported。
+func TestUpstreamBillingProbeOpenAIOfficialBaseURLSkipsRequest(t *testing.T) {
+	for i, baseURL := range []string{"", "https://api.openai.com", "https://api.openai.com/v1"} {
+		creds := map[string]any{"api_key": "sk-openai"}
+		if baseURL != "" {
+			creds["base_url"] = baseURL
+		}
+		account := &Account{
+			ID:          int64(17 + i),
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeAPIKey,
+			Status:      StatusActive,
+			Credentials: creds,
+		}
+		repo := &upstreamBillingProbeAccountRepo{accounts: map[int64]*Account{account.ID: account}}
+		upstream := &httpUpstreamRecorder{}
+		svc := newUpstreamBillingProbeTestService(repo, upstream, &upstreamBillingProbeSettingRepo{})
 
-	_, err := svc.ProbeAccount(context.Background(), account.ID)
-	require.NoError(t, err)
-	require.Equal(t, "https://api.openai.com/v1/sub2api/billing", upstream.lastReq.URL.String())
-	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.lastReq.Context()))
+		snapshot, err := svc.ProbeAccount(context.Background(), account.ID)
+		require.NoError(t, err, baseURL)
+		require.Equal(t, UpstreamBillingProbeStatusUnsupported, snapshot.Status, baseURL)
+		require.Nil(t, upstream.lastReq, baseURL)
+	}
 }
 
 func TestUpstreamBillingProbeSetAccountEnabledAcceptsGrokAPIKey(t *testing.T) {

@@ -211,7 +211,7 @@ func TestEnrichTokenInfo_WorkspaceEntitlementDoesNotOverridePersonalSubscription
 		PlanType:         "pro", // 来自 id_token 的个人套餐
 	}
 	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
-	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	svc.enrichTokenInfo(context.Background(), tokenInfo, "", true)
 
 	require.Equal(t, "pro", tokenInfo.PlanType)
 	require.Equal(t, personalActiveUntil, tokenInfo.SubscriptionExpiresAt,
@@ -254,7 +254,7 @@ func TestEnrichTokenInfo_KeepsEntitlementWhenAccountMatches(t *testing.T) {
 		PlanType:         "plus",
 	}
 	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
-	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	svc.enrichTokenInfo(context.Background(), tokenInfo, "", true)
 
 	require.Equal(t, entitlementExpiresAt, tokenInfo.SubscriptionExpiresAt)
 	require.Zero(t, subscriptionCalls, "账号一致时不应额外请求订阅端点")
@@ -294,7 +294,7 @@ func TestEnrichTokenInfo_WorkspacePlanTypeKeepsItsOwnExpiry(t *testing.T) {
 		// id_token 没带 chatgpt_plan_type
 	}
 	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
-	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	svc.enrichTokenInfo(context.Background(), tokenInfo, "", true)
 
 	require.Equal(t, "self_serve_business_usage_based", tokenInfo.PlanType)
 	require.Equal(t, workspaceExpiresAt, tokenInfo.SubscriptionExpiresAt,

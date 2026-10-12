@@ -519,6 +519,155 @@ func TestApplyCodexFingerprintClientMetadata_FullMode(t *testing.T) {
 	assert.Equal(t, convergedSession, cm["thread_id"], "full 模式 thread_id 应等于 session_id")
 }
 
+// --- session/full 模式的出站 turn_id 跟随客户端回合 ---
+
+// convergedTurnFromHeaders 模拟一次请求：客户端在 x-codex-turn-metadata 头里
+// 声明回合，返回出站头里的 turn_id 与 turn_started_at_unix_ms。
+func convergedTurnFromHeaders(t *testing.T, account *Account, clientTurnMeta string) (string, any) {
+	t.Helper()
+	clientHeaders := http.Header{}
+	clientHeaders.Set("session-id", "client-session-turn")
+	if clientTurnMeta != "" {
+		clientHeaders.Set("x-codex-turn-metadata", clientTurnMeta)
+	}
+	ids := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+	require.NotNil(t, ids)
+	out := http.Header{}
+	out.Set("x-codex-turn-metadata", clientHeaders.Get("x-codex-turn-metadata"))
+	if clientTurnMeta == "" {
+		out.Set("x-codex-turn-metadata", `{"sandbox":"seccomp"}`)
+	}
+	applyCodexFingerprintHeaders(out, ids)
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out.Get("x-codex-turn-metadata")), &meta))
+	turnID, _ := meta["turn_id"].(string)
+	return turnID, meta["turn_started_at_unix_ms"]
+}
+
+func TestFingerprintSessionTurnIDStableWithinClientTurn(t *testing.T) {
+	for _, mode := range []string{"session", "full"} {
+		t.Run(mode, func(t *testing.T) {
+			account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: mode})
+			turnA := `{"turn_id":"019a0000-0000-7000-8000-00000000000a","turn_started_at_unix_ms":1791600000000}`
+			turnB := `{"turn_id":"019a0000-0000-7000-8000-00000000000b","turn_started_at_unix_ms":1791600099000}`
+
+			first, firstStarted := convergedTurnFromHeaders(t, account, turnA)
+			second, secondStarted := convergedTurnFromHeaders(t, account, turnA)
+			other, otherStarted := convergedTurnFromHeaders(t, account, turnB)
+
+			assert.Equal(t, first, second, "同一客户端回合的续轮请求必须得到同一个出站 turn_id")
+			assert.NotEqual(t, first, other, "不同客户端回合必须得到不同出站 turn_id")
+			assert.NotEqual(t, "019a0000-0000-7000-8000-00000000000a", first, "出站 turn_id 不得原样透传客户端值")
+			assert.Equal(t, float64(1791600000000), firstStarted, "turn_started_at 沿用客户端值")
+			assert.Equal(t, firstStarted, secondStarted)
+			assert.Equal(t, float64(1791600099000), otherStarted)
+		})
+	}
+}
+
+func TestFingerprintSessionTurnIDScopedPerAccount(t *testing.T) {
+	turn := `{"turn_id":"019a0000-0000-7000-8000-00000000000a","turn_started_at_unix_ms":1791600000000}`
+	a, _ := convergedTurnFromHeaders(t, newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"}), turn)
+	b, _ := convergedTurnFromHeaders(t, newTestOAuthAccount(2, map[string]any{
+		codexFingerprintModeExtraKey: "session",
+		codexFingerprintSeedExtraKey: "22222222-2222-4222-8222-222222222222",
+	}), turn)
+	assert.NotEqual(t, a, b, "不同账号种子不得派生出相同 turn_id")
+}
+
+func TestFingerprintSessionTurnIDKeepsUUIDv7Timestamp(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
+	clientTurn := uuid.Must(uuid.NewV7())
+	turnID, _ := convergedTurnFromHeaders(t, account, `{"turn_id":"`+clientTurn.String()+`"}`)
+	parsed, err := uuid.Parse(turnID)
+	require.NoError(t, err)
+	assert.Equal(t, uuid.Version(7), parsed.Version(), "保持真实 Codex 的 UUIDv7 格式")
+	assert.Equal(t, uuid.RFC4122, parsed.Variant())
+	assert.Equal(t, clientTurn[0:6], parsed[0:6], "沿用客户端 turn_id 的毫秒时间戳")
+}
+
+func TestFingerprintSessionTurnWithoutClientStartedAtOmitsField(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
+	_, started := convergedTurnFromHeaders(t, account, `{"turn_id":"client-turn"}`)
+	assert.Nil(t, started, "客户端没给开始时间时不得每个请求补当前时间")
+}
+
+func TestFingerprintSessionWithoutClientTurnKeepsFallback(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
+	first, firstStarted := convergedTurnFromHeaders(t, account, "")
+	second, _ := convergedTurnFromHeaders(t, account, "")
+	assert.NotEmpty(t, first)
+	assert.NotEqual(t, first, second, "客户端未声明回合时保留随机兜底")
+	assert.NotNil(t, firstStarted)
+}
+
+// 生产顺序是先改写 body、后改写出站头。客户端只在 body 里声明回合时，头和体
+// 必须得到同一个派生 turn_id，且回合内稳定。
+func TestFingerprintSessionTurnFromBodyConsistentAcrossCarriers(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
+	run := func() (string, string, string) {
+		clientHeaders := http.Header{}
+		clientHeaders.Set("session-id", "client-session-body")
+		ids := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+		require.NotNil(t, ids)
+		reqBody := map[string]any{"client_metadata": map[string]any{
+			"turn_id":               "body-turn-1",
+			"x-codex-turn-metadata": `{"turn_id":"body-turn-1","turn_started_at_unix_ms":1791600000000}`,
+		}}
+		require.True(t, applyCodexFingerprintClientMetadata(reqBody, ids))
+		out := http.Header{}
+		out.Set("x-codex-turn-metadata", `{"sandbox":"seccomp"}`)
+		applyCodexFingerprintHeaders(out, ids)
+
+		cm := reqBody["client_metadata"].(map[string]any)
+		flat, _ := cm["turn_id"].(string)
+		var embedded, header map[string]any
+		require.NoError(t, json.Unmarshal([]byte(cm["x-codex-turn-metadata"].(string)), &embedded))
+		require.NoError(t, json.Unmarshal([]byte(out.Get("x-codex-turn-metadata")), &header))
+		assert.Equal(t, float64(1791600000000), embedded["turn_started_at_unix_ms"])
+		assert.Equal(t, embedded["turn_started_at_unix_ms"], header["turn_started_at_unix_ms"])
+		return flat, embedded["turn_id"].(string), header["turn_id"].(string)
+	}
+	flat1, embedded1, header1 := run()
+	flat2, _, _ := run()
+	assert.Equal(t, flat1, embedded1)
+	assert.Equal(t, flat1, header1, "头和体的 turn_id 必须一致")
+	assert.Equal(t, flat1, flat2, "回合内稳定")
+	assert.NotEqual(t, "body-turn-1", flat1)
+}
+
+// 真实 Codex 续轮请求带 root_turn_id == turn_id。出站载体里的 turn_id 可能已被
+// 账号身份命名空间改写（root_turn_id 没有），改写后两者仍必须相等，且不得
+// 把客户端原值留给上游。
+func TestFingerprintSessionRootTurnIDFollowsTurnID(t *testing.T) {
+	account := newTestOAuthAccount(1, map[string]any{codexFingerprintModeExtraKey: "session"})
+	clientHeaders := http.Header{}
+	clientHeaders.Set("session-id", "client-session-root")
+	clientHeaders.Set("x-codex-turn-metadata", `{"turn_id":"client-turn","root_turn_id":"client-turn","turn_started_at_unix_ms":1791600000000}`)
+	ids := resolveCodexFingerprintIDsFromRequest(account, clientHeaders)
+	require.NotNil(t, ids)
+
+	reqBody := map[string]any{"client_metadata": map[string]any{
+		"turn_id":               "account-scoped-turn",
+		"x-codex-turn-metadata": `{"turn_id":"account-scoped-turn","root_turn_id":"client-turn","parent_turn_id":"older-turn"}`,
+	}}
+	require.True(t, applyCodexFingerprintClientMetadata(reqBody, ids))
+	out := http.Header{}
+	out.Set("x-codex-turn-metadata", `{"turn_id":"account-scoped-turn","root_turn_id":"client-turn","parent_turn_id":"older-turn"}`)
+	applyCodexFingerprintHeaders(out, ids)
+
+	var header, embedded map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out.Get("x-codex-turn-metadata")), &header))
+	require.NoError(t, json.Unmarshal([]byte(reqBody["client_metadata"].(map[string]any)["x-codex-turn-metadata"].(string)), &embedded))
+	for name, meta := range map[string]map[string]any{"header": header, "body": embedded} {
+		assert.Equal(t, ids.turnID, meta["turn_id"], name)
+		assert.Equal(t, ids.turnID, meta["root_turn_id"], "%s: root_turn_id 必须跟随出站 turn_id", name)
+		assert.Equal(t, deriveConvergedTurnID(ids.seed, "older-turn"), meta["parent_turn_id"], "%s: 其他回合按同一规则派生", name)
+	}
+	seed, _ := codexFingerprintSeed(account.Extra)
+	assert.Equal(t, deriveConvergedTurnID(seed, "client-turn"), ids.turnID)
+}
+
 // --- extractClientSessionID ---
 
 func TestExtractClientSessionID(t *testing.T) {

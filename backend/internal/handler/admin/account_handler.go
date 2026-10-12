@@ -1084,8 +1084,10 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		createdAccount = account
 		// Antigravity OAuth: 新账号直接设置隐私
 		h.adminService.ForceAntigravityPrivacy(ctx, account)
-		// OpenAI OAuth: 新账号直接设置隐私
-		h.adminService.ForceOpenAIPrivacy(ctx, account)
+		// OpenAI OAuth: 仅在显式开启自动关闭训练数据共享时才设置隐私（默认关闭）
+		if service.OpenAIAutoDisableTrainingEnabled() {
+			h.adminService.ForceOpenAIPrivacy(ctx, account)
+		}
 		return h.buildAccountResponseWithRuntime(ctx, account), nil
 	})
 	if err != nil {
@@ -2205,7 +2207,7 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 				}
 			}()
 		}
-		if len(openaiPrivacyAccounts) > 0 {
+		if len(openaiPrivacyAccounts) > 0 && service.OpenAIAutoDisableTrainingEnabled() {
 			accounts := openaiPrivacyAccounts
 			go func() {
 				defer func() {

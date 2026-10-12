@@ -222,7 +222,7 @@ func TestRewriteOpenAIBodyForBpsExcel(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "developer", prologue["role"])
 	prologueText := prologue["content"].([]any)[0].(map[string]any)["text"].(string)
-	require.Contains(t, prologueText, "external OpenAI Responses API client")
+	require.Contains(t, prologueText, "There is no live Excel workbook in this session")
 	// 原历史里的 function_call_output 仍在，id 归一到 call_id 派生值。
 	tail, ok := input[4].(map[string]any)
 	require.True(t, ok)

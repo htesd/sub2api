@@ -202,7 +202,8 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		tokenInfo.PlanType = userInfo.PlanType
 	}
 
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	// 授权码导入：完整补全账号信息（accounts/check + subscriptions），隐私按开关处理。
+	s.enrichTokenInfo(ctx, tokenInfo, proxyURL, true)
 
 	return tokenInfo, nil
 }
@@ -249,16 +250,29 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 		tokenInfo.PlanType = userInfo.PlanType
 	}
 
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+	// 刷新路径：只在 id_token 缺 plan_type（如 Mobile RT）时才回退查 accounts/check。
+	s.enrichTokenInfo(ctx, tokenInfo, proxyURL, false)
 
 	return tokenInfo, nil
 }
 
-// enrichTokenInfo 通过 ChatGPT backend-api 补全 tokenInfo 并设置隐私（best-effort）。
-// 从 accounts/check 获取最新 plan_type、subscription_expires_at、email，
-// 然后尝试关闭训练数据共享。适用于所有获取/刷新 token 的路径。
-func (s *OpenAIOAuthService) enrichTokenInfo(ctx context.Context, tokenInfo *OpenAITokenInfo, proxyURL string) {
+// enrichTokenInfo 通过 ChatGPT backend-api 补全 tokenInfo（best-effort）。
+//
+// fullLookup=true（授权码导入）时从 accounts/check 获取 plan_type、subscription_expires_at、email；
+// fullLookup=false（各类刷新路径）时只在 id_token 没带 plan_type 时才回退查询——上游原实现每次刷新
+// 都固定连发 accounts/check → subscriptions → 隐私 PATCH，几毫秒内同一串请求，所有部署一模一样。
+// 关闭训练数据共享只在导入时、且 OpenAIAutoDisableTrainingEnabled() 为真时执行；刷新时由
+// TokenRefreshService.ensureOpenAIPrivacy 按 Extra.privacy_mode 判定，不再无条件重发。
+func (s *OpenAIOAuthService) enrichTokenInfo(ctx context.Context, tokenInfo *OpenAITokenInfo, proxyURL string, fullLookup bool) {
 	if tokenInfo.AccessToken == "" || s.privacyClientFactory == nil {
+		return
+	}
+	if fullLookup && OpenAIAutoDisableTrainingEnabled() {
+		defer func() {
+			tokenInfo.PrivacyMode = disableOpenAITraining(ctx, s.privacyClientFactory, tokenInfo.AccessToken, proxyURL)
+		}()
+	}
+	if !fullLookup && strings.TrimSpace(tokenInfo.PlanType) != "" {
 		return
 	}
 
@@ -302,9 +316,6 @@ func (s *OpenAIOAuthService) enrichTokenInfo(ctx context.Context, tokenInfo *Ope
 			tokenInfo.SubscriptionExpiresAt = expiresAt
 		}
 	}
-
-	// 尝试设置隐私（关闭训练数据共享），best-effort
-	tokenInfo.PrivacyMode = disableOpenAITraining(ctx, s.privacyClientFactory, tokenInfo.AccessToken, proxyURL)
 }
 
 func shouldApplyChatGPTAccountInfoPlanType(current, candidate string) bool {
@@ -379,7 +390,7 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 				tokenInfo.ExpiresAt = expiresAt.Unix()
 				tokenInfo.ExpiresIn = int64(time.Until(*expiresAt).Seconds())
 			}
-			s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+			s.enrichTokenInfo(ctx, tokenInfo, proxyURL, false)
 			return tokenInfo, nil
 		}
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_NO_REFRESH_TOKEN", "no refresh token available")

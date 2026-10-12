@@ -142,7 +142,7 @@ func TestRewriteOpenAIBodyForBpsExcelToolChoiceNoneDropsDeclarations(t *testing.
 	require.NoError(t, err)
 	require.Empty(t, specs)
 	require.NotContains(t, string(rewritten), "additional_tools")
-	require.Contains(t, gjson.GetBytes(rewritten, "input.0.content.0.text").String(), "external OpenAI Responses API client")
+	require.Contains(t, gjson.GetBytes(rewritten, "input.0.content.0.text").String(), "There is no live Excel workbook in this session")
 }
 
 // additional_tools 载体里的托管工具与顶层同一规则：可丢弃的放行，其余留 codex。

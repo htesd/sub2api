@@ -265,6 +265,7 @@ func resolveConvergedThreadID(seed, clientSessionID string) string {
 type codexFingerprintIDs struct {
 	accountID                     int64
 	mode                          codexFingerprintMode
+	seed                          string
 	installationID                string
 	sessionID                     string
 	threadID                      string
@@ -273,6 +274,23 @@ type codexFingerprintIDs struct {
 	turnStartedAtUnixMs           int64
 	originalBodySessionID         string
 	originalBodySessionIDCaptured bool
+	// turnBound：turn_id / turn_started_at 已从客户端原始回合标识确定性派生。
+	// turnApplied：已有载体（头或体）写出过 turn 字段，此后不得再改，
+	// 否则同一请求的头和体会出现两套 turn_id。
+	turnBound    bool
+	turnApplied  bool
+	clientTurnID string
+	// 会话池相关（见 openai_codex_fingerprint_session_pool.go）。
+	// namespace 是账号身份命名空间，用作根线程选举的键；sessions 是会话池大小。
+	// parentThread 是出站 parent_thread_id；mounted 表示这个线程是我们挂上去的
+	// 子代理（客户端自带的子代理不置位，它自己的标记原样透传）。
+	namespace       string
+	sessions        int
+	clientSessionID string
+	parentThread    string
+	mounted         bool
+	threadBound     bool
+	threadApplied   bool
 }
 
 // resolveCodexFingerprintIDs 按收敛模式计算出站 ID 集合。
@@ -292,7 +310,11 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 	ids := &codexFingerprintIDs{
 		accountID:           account.ID,
 		mode:                mode,
+		seed:                seed,
 		turnStartedAtUnixMs: time.Now().UnixMilli(),
+		namespace:           codexAccountIdentityNamespace(account),
+		sessions:            codexFingerprintSessionCount(account.Extra),
+		clientSessionID:     strings.TrimSpace(clientSessionID),
 	}
 
 	ids.installationID = resolveConvergedInstallationID(account, seed)
@@ -310,6 +332,7 @@ func resolveCodexFingerprintIDs(account *Account, clientSessionID string, mode c
 		if ids.threadID == "" {
 			ids.threadID = ids.sessionID
 		}
+		// 兜底值：客户端没有声明回合标识时才会真正使用（见 adoptClientTurn）。
 		ids.turnID = uuid.Must(uuid.NewV7()).String()
 		ids.windowID = ids.threadID + ":0"
 		return ids
@@ -350,7 +373,134 @@ func resolveCodexFingerprintIDsFromRequest(account *Account, clientHeaders http.
 	if clientHeaders != nil {
 		clientSessionID = extractClientSessionID(clientHeaders)
 	}
-	return resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	ids := resolveCodexFingerprintIDs(account, clientSessionID, mode)
+	ids.adoptClientTurn(codexClientTurnIdentity(clientHeaders, nil))
+	ids.adoptClientThread(clientHeaders, nil)
+	return ids
+}
+
+// codexClientTurnIdentity 取客户端原始回合标识（turn_id + turn_started_at_unix_ms）。
+// 优先 x-codex-turn-metadata 请求头，其次 client_metadata.turn_id / 内嵌
+// x-codex-turn-metadata。同一客户端每个请求携带的载体相同，因此优先级选择在
+// 回合内稳定。startedAt 为 0 表示客户端没有提供。
+func codexClientTurnIdentity(h http.Header, clientMetadata map[string]any) (string, int64) {
+	fromMetadata := func(raw string) (string, int64) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || !gjson.Valid(raw) {
+			return "", 0
+		}
+		meta := gjson.Parse(raw)
+		if !meta.IsObject() {
+			return "", 0
+		}
+		return strings.TrimSpace(meta.Get("turn_id").String()), meta.Get("turn_started_at_unix_ms").Int()
+	}
+	if h != nil {
+		if turnID, startedAt := fromMetadata(h.Get("x-codex-turn-metadata")); turnID != "" {
+			return turnID, startedAt
+		}
+	}
+	if clientMetadata == nil {
+		return "", 0
+	}
+	embedded, _ := clientMetadata["x-codex-turn-metadata"].(string)
+	embeddedTurnID, embeddedStartedAt := fromMetadata(embedded)
+	if flat, ok := clientMetadata["turn_id"].(string); ok && strings.TrimSpace(flat) != "" {
+		startedAt := int64(0)
+		if embeddedTurnID == strings.TrimSpace(flat) {
+			startedAt = embeddedStartedAt
+		}
+		return strings.TrimSpace(flat), startedAt
+	}
+	return embeddedTurnID, embeddedStartedAt
+}
+
+// adoptClientTurn 让 session/full 模式的 turn_id 跟随客户端回合：同一回合的所有
+// 请求（工具调用续轮等）得到同一个出站 turn_id 与 turn_started_at，不同回合得到
+// 不同值。此前每个请求都生成随机 turn_id + 当前时间，上游会把每个请求都看成新
+// 回合，同时又收到上一回合的 x-codex-turn-state，两者自相矛盾。
+//
+// 只在任何载体写出 turn 字段之前生效；客户端没有回合标识时保留随机兜底值。
+func (ids *codexFingerprintIDs) adoptClientTurn(clientTurnID string, clientStartedAt int64) {
+	if ids == nil || ids.turnBound || ids.turnApplied {
+		return
+	}
+	if ids.mode != codexFingerprintSession && ids.mode != codexFingerprintFull {
+		return
+	}
+	clientTurnID = strings.TrimSpace(clientTurnID)
+	if clientTurnID == "" || ids.seed == "" {
+		return
+	}
+	ids.clientTurnID = clientTurnID
+	ids.turnID = deriveConvergedTurnID(ids.seed, clientTurnID)
+	// 客户端没给开始时间就不写该字段，保持与客户端一致，而不是每个请求填当前时间。
+	if clientStartedAt < 0 {
+		clientStartedAt = 0
+	}
+	ids.turnStartedAtUnixMs = clientStartedAt
+	ids.turnBound = true
+}
+
+// deriveConvergedTurnID 由账号种子和客户端 turn_id 确定性派生 UUIDv7 形式的
+// turn_id。客户端 turn_id 本身是 UUIDv7 时沿用其 48 位毫秒时间戳，保持真实
+// Codex 的时间有序格式；否则时间位也取自哈希。
+func deriveConvergedTurnID(seed, clientTurnID string) string {
+	h := sha256.Sum256([]byte("sub2api:codex-turn-id:v2:" + seed + ":" + clientTurnID))
+	b := h[:16]
+	if parsed, err := uuid.Parse(clientTurnID); err == nil && parsed.Version() == 7 {
+		copy(b[0:6], parsed[0:6])
+	}
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 1
+	var out uuid.UUID
+	copy(out[:], b)
+	return out.String()
+}
+
+// codexRelatedTurnIDFields 是 turn metadata 里引用其他回合的字段。真实 Codex 在
+// 回合续轮请求里带 root_turn_id（等于当前 turn_id）；只改 turn_id 不改它们会让
+// 两者对不上，并把客户端原值暴露给上游。
+var codexRelatedTurnIDFields = []string{"root_turn_id", "parent_turn_id"}
+
+// convergeRelatedTurnIDs 改写关联回合字段，必须在载体的 turn_id 被覆盖之前调用。
+// 指向当前回合的值（等于载体当前 turn_id 或客户端原始 turn_id；前者可能已被
+// 账号身份命名空间改写过）直接换成出站 turn_id，保持 root_turn_id == turn_id；
+// 指向其他回合的值按同一规则派生，与那个回合当时的出站 turn_id 一致。
+func (ids *codexFingerprintIDs) convergeRelatedTurnIDs(metadata map[string]any) {
+	if ids == nil || ids.seed == "" || metadata == nil {
+		return
+	}
+	current, _ := metadata["turn_id"].(string)
+	current = strings.TrimSpace(current)
+	for _, field := range codexRelatedTurnIDFields {
+		raw, ok := metadata[field].(string)
+		if raw = strings.TrimSpace(raw); !ok || raw == "" {
+			continue
+		}
+		if raw == current || (ids.clientTurnID != "" && raw == ids.clientTurnID) {
+			metadata[field] = ids.turnID
+		} else {
+			metadata[field] = deriveConvergedTurnID(ids.seed, raw)
+		}
+	}
+}
+
+// convergedTurnFields 返回 session/full 模式要写入 turn metadata 的回合字段。
+// 调用即视为已写出，之后 adoptClientTurn 不再改动 ids。
+func (ids *codexFingerprintIDs) convergedTurnFields() map[string]any {
+	ids.turnApplied = true
+	fields := map[string]any{
+		"installation_id": ids.installationID,
+		"session_id":      ids.sessionID,
+		"thread_id":       ids.threadID,
+		"turn_id":         ids.turnID,
+		"window_id":       ids.windowID,
+	}
+	if ids.turnStartedAtUnixMs > 0 {
+		fields["turn_started_at_unix_ms"] = ids.turnStartedAtUnixMs
+	}
+	return fields
 }
 
 // applyCodexFingerprintHeaders 按预计算的收敛 ID 改写出站 HTTP 头中的设备指纹。
@@ -377,21 +527,20 @@ func applyCodexFingerprintHeaders(h http.Header, ids *codexFingerprintIDs) {
 	h.Set("session-id", ids.sessionID)
 	h.Set("session_id", ids.sessionID)
 	h.Set("thread-id", ids.threadID)
+	applyCodexFingerprintThreadHeaders(h, ids)
 
-	rewriteCodexTurnMetadataFields(h, map[string]any{
-		"installation_id":         ids.installationID,
-		"session_id":              ids.sessionID,
-		"thread_id":               ids.threadID,
-		"turn_id":                 ids.turnID,
-		"window_id":               ids.windowID,
-		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
-	})
+	fields := ids.convergedTurnFields()
+	for k, v := range ids.convergedThreadFields() {
+		fields[k] = v
+	}
+	rewriteCodexTurnMetadataFields(h, fields, ids.convergeRelatedTurnIDs, ids.convergeThreadScopedIDs)
 }
 
 // rewriteCodexTurnMetadataFields 解析 x-codex-turn-metadata 头中的 JSON，
 // 替换指定字段后回写。合法对象保留未指定字段（如 sandbox、thread_source）；
 // 非法/非对象值重建为最小合法 metadata，避免 flat 与 embedded identity 分裂。
-func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any) {
+// adjust 在写入 fields 之前对原 metadata 做额外改写（如关联回合字段）。
+func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any, adjust ...func(map[string]any)) {
 	raw := strings.TrimSpace(h.Get("x-codex-turn-metadata"))
 	if raw == "" {
 		return
@@ -399,6 +548,9 @@ func rewriteCodexTurnMetadataFields(h http.Header, fields map[string]any) {
 	var metadata map[string]any
 	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any, len(fields))
+	}
+	for _, fn := range adjust {
+		fn(metadata)
 	}
 	for k, v := range fields {
 		metadata[k] = v
@@ -456,20 +608,22 @@ func applyCodexFingerprintToClientMetadataMap(existing map[string]any, ids *code
 		return modified
 	}
 
-	// session / full 模式
+	// session / full 模式。请求头没有回合标识时（例如只在 body 里声明），
+	// 改写前从 client_metadata 取客户端回合。
+	ids.adoptClientTurn(codexClientTurnIdentity(nil, existing))
+	ids.adoptClientThread(nil, existing)
+	ids.convergeRelatedTurnIDs(existing)
 	existing["session_id"] = ids.sessionID
 	existing["thread_id"] = ids.threadID
 	existing["turn_id"] = ids.turnID
 	existing["x-codex-window-id"] = ids.windowID
+	applyCodexFingerprintThreadClientMetadata(existing, ids)
 
-	rewriteClientMetadataEmbeddedTurnMetadata(existing, map[string]any{
-		"installation_id":         ids.installationID,
-		"session_id":              ids.sessionID,
-		"thread_id":               ids.threadID,
-		"turn_id":                 ids.turnID,
-		"window_id":               ids.windowID,
-		"turn_started_at_unix_ms": ids.turnStartedAtUnixMs,
-	})
+	fields := ids.convergedTurnFields()
+	for k, v := range ids.convergedThreadFields() {
+		fields[k] = v
+	}
+	rewriteClientMetadataEmbeddedTurnMetadata(existing, fields, ids.convergeRelatedTurnIDs, ids.convergeThreadScopedIDs)
 	return true
 }
 
@@ -584,7 +738,7 @@ func applyCodexFingerprintClientMetadataRaw(body []byte, ids *codexFingerprintID
 // rewriteClientMetadataEmbeddedTurnMetadata 改写 client_metadata 中内嵌的
 // x-codex-turn-metadata JSON 字符串里的指定字段。非法/非对象值会重建，
 // 避免 flat client_metadata 与 embedded metadata 暴露两套身份。
-func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fields map[string]any) {
+func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fields map[string]any, adjust ...func(map[string]any)) {
 	raw, ok := clientMetadata["x-codex-turn-metadata"].(string)
 	if !ok || raw == "" {
 		return
@@ -592,6 +746,9 @@ func rewriteClientMetadataEmbeddedTurnMetadata(clientMetadata map[string]any, fi
 	var metadata map[string]any
 	if err := json.Unmarshal([]byte(raw), &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any, len(fields))
+	}
+	for _, fn := range adjust {
+		fn(metadata)
 	}
 	for k, v := range fields {
 		metadata[k] = v

@@ -311,6 +311,10 @@ gateway:
   # Docker 用户可将宿主机文件挂载到 /app/data/codex-instructions.md.tmpl，
   # 然后把本字段指向该路径。
   forced_codex_instructions_template_file: ""
+  # 导入 / 新建 / 刷新 OpenAI OAuth 账号时是否自动关闭 ChatGPT「用我的内容改进模型」。
+  # 默认 false：该请求在所有部署中完全一致，会暴露托管特征，且会覆盖手动打开的共享设置。
+  # 管理端「设置隐私」按钮不受影响。
+  openai_auto_disable_training: false
   # OpenAI 透传模式是否放行客户端超时头（如 x-stainless-timeout）
   # 默认 false：过滤超时头，降低上游提前断流风险。
   openai_passthrough_allow_timeout_headers: false

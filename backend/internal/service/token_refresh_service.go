@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -240,22 +241,33 @@ func (s *TokenRefreshService) refreshLoop() {
 		checkInterval = 5 * time.Minute
 	}
 
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+	// 检查间隔带 ±20% 随机抖动：固定周期 ticker 会让每轮刷新都落在同样的相位上，
+	// 叠加同一出口的多个账号就是规律的定时批量请求。
+	timer := time.NewTimer(jitterTokenRefreshInterval(checkInterval))
+	defer timer.Stop()
 
 	// 启动时立即执行一次检查
 	s.processRefreshContext(ctx)
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			s.processRefreshContext(ctx)
+			timer.Reset(jitterTokenRefreshInterval(checkInterval))
 		case <-ctx.Done():
 			return
 		case <-s.stopCh:
 			return
 		}
 	}
+}
+
+// jitterTokenRefreshInterval 返回 base 的 80%~120% 之间的随机时长。
+func jitterTokenRefreshInterval(base time.Duration) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
 }
 
 type tokenRefreshPageStats struct {
@@ -1441,6 +1453,10 @@ func isNonRetryableRefreshError(err error) bool {
 // ensureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化结果到 Extra。
 func (s *TokenRefreshService) ensureOpenAIPrivacy(ctx context.Context, account *Account) {
+	// 默认不在刷新流程里碰上游的训练数据共享设置（见 openAIAutoDisableTraining）。
+	if !OpenAIAutoDisableTrainingEnabled() {
+		return
+	}
 	if account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
 		return
 	}

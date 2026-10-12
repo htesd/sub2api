@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/imroc/req/v3"
@@ -21,6 +22,25 @@ const (
 	PrivacyModeFailed      = "training_set_failed"
 	PrivacyModeCFBlocked   = "training_set_cf_blocked"
 )
+
+// openAIAutoDisableTraining 是「导入 / 新建 / 刷新账号时自动关闭 ChatGPT 训练数据共享」的进程级开关。
+//
+// 上游原实现把这个 PATCH 硬编码进了每一次 token 刷新（enrichTokenInfo）以及新建、批量导入、
+// 管理端刷新等路径，且所有部署都用同一个 req 库浏览器伪装发出完全相同的请求——等于把
+// 「这个号由 sub2api 托管」主动告诉上游；管理员手动打开的共享设置也会在下一次刷新被改回去。
+// 现在默认关闭（零值 false），只有显式配置 gateway.openai_auto_disable_training=true 才恢复旧行为；
+// 管理端「设置隐私」按钮（POST /admin/accounts/:id/set-privacy）不受此开关影响，仍可手动执行。
+var openAIAutoDisableTraining atomic.Bool
+
+// SetOpenAIAutoDisableTrainingEnabled 由持有配置的服务在构造时发布开关快照。
+func SetOpenAIAutoDisableTrainingEnabled(enabled bool) {
+	openAIAutoDisableTraining.Store(enabled)
+}
+
+// OpenAIAutoDisableTrainingEnabled 返回是否在自动流程里关闭训练数据共享。
+func OpenAIAutoDisableTrainingEnabled() bool {
+	return openAIAutoDisableTraining.Load()
+}
 
 func shouldSkipOpenAIPrivacyEnsure(extra map[string]any) bool {
 	if extra == nil {

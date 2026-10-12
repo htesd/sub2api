@@ -629,12 +629,10 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 	if account.IsCNProvider() && account.IsAdaptiveAPIProtocol() {
 		baseURL = account.GetCNProtocolBaseURL(APIProtocolChatCompletions)
 	}
-	if account.Platform == PlatformOpenAI {
-		if baseURL == "" {
-			// 保持官方语义：OpenAI 账号无自定义 base 时探官方域（404 → unsupported）。
-			baseURL = "https://api.openai.com"
-		}
-	} else if upstreamBillingProbeTargetIsOfficialAPI(baseURL) {
+	if upstreamBillingProbeTargetIsOfficialAPI(baseURL) {
+		// OpenAI 账号以前在 base_url 为空时会拿账号 Key 周期性请求
+		// api.openai.com/v1/sub2api/billing 再按 404 记 unsupported——路径里带着 "sub2api"，
+		// 等于向官方声明网关身份；现与其他平台统一，不发请求。
 		// 其他平台 base_url 为空或指向官方 API 根域（前端创建时会把空值
 		// 填成官方默认域，且提供 us-east-1.api.x.ai 等官方区域预设）⇒
 		// 必无 /v1/sub2api/billing；不发请求，直接记 unsupported，避免

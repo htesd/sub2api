@@ -1106,7 +1106,7 @@ func TestOpenAIGatewayService_Forward_WSv2_CodexFingerprintHandshakeBodyParityAn
 	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
 	c.Request.Header.Set("originator", "codex_cli_rs")
 	c.Request.Header.Set("session-id", "header-session")
-	c.Request.Header.Set("x-codex-turn-metadata", `{"installation_id":"header-install","session_id":"header-session","thread_id":"header-thread","turn_id":"header-turn","window_id":"header-window","sandbox":"seatbelt"}`)
+	c.Request.Header.Set("x-codex-turn-metadata", `{"installation_id":"header-install","session_id":"header-session","thread_id":"header-thread","turn_id":"header-turn","window_id":"header-window","sandbox":"seatbelt","turn_started_at_unix_ms":1791600000000}`)
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false
@@ -1180,7 +1180,8 @@ func TestOpenAIGatewayService_Forward_WSv2_CodexFingerprintHandshakeBodyParityAn
 	require.Equal(t, wantThread, gjson.Get(bodyTurnMetadata, "thread_id").String())
 	require.Equal(t, wantSession, gjson.Get(headerTurnMetadata, "session_id").String())
 	require.Equal(t, gjson.Get(bodyTurnMetadata, "turn_id").String(), gjson.Get(headerTurnMetadata, "turn_id").String())
-	require.NotZero(t, gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Int())
+	require.Equal(t, deriveConvergedTurnID(seed, "header-turn"), gjson.Get(headerTurnMetadata, "turn_id").String(), "出站 turn_id 由客户端回合确定性派生")
+	require.Equal(t, int64(1791600000000), gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Int(), "沿用客户端回合开始时间")
 	require.Equal(t,
 		gjson.Get(bodyTurnMetadata, "turn_started_at_unix_ms").Int(),
 		gjson.Get(headerTurnMetadata, "turn_started_at_unix_ms").Int(),

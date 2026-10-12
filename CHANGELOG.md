@@ -1,3 +1,66 @@
+## [0.2.14-session-capacity-antistorm.31] - 2026-10-10
+### Features
+- session 指纹模式新增会话池与子代理挂载，由账号级 `extra.codex_fingerprint_sessions`（整数，缺省 1 = 旧行为，上限 64）开启。开启后：
+  - 客户端线程按确定性分桶散到 N 个上游会话；会话序号 0 沿用原来的单会话取值，开启时不会所有客户端同时换会话。
+  - 每个会话内选出一个根线程（首个到达的线程当选，空闲 6h 后重新选举）。非根线程挂成它的子代理，补齐 `x-codex-parent-thread-id` / `x-openai-subagent=collab_spawn` / `subagent_kind=thread_spawn` / `thread_source=subagent`，请求头、`client_metadata`、内嵌 `x-codex-turn-metadata` 三处一致。
+  - thread_id 改为从客户端线程标识（thread-id 头 / turn metadata / client_metadata）派生，客户端 thread_id 等于 session-id 时取值与旧实现相同。
+  - 客户端自己声明父线程时按它自己的子代理处理：父线程做同一规则的映射（映射结果等于父线程自己的出站 thread_id），按父线程分桶保证同会话，不额外补标记。
+  - 窗口编号沿用客户端 `window_id` 的 `:N` 后缀（旧实现恒定写 `:0`）。
+  - `forked_from_thread_id` / `guardian_classifier_source_thread_id` / `context_window_id` 按线程命名空间映射，不再把客户端原值发给上游。
+
+### Design Rationale
+- 旧 session 模式的出站结构是「1 个 installation + 1 个 session + N 个无标记线程」。真实 Codex 里一个会话下出现多个线程只有一种来源：父线程 spawn 子代理，子代理请求必带 x-openai-subagent / parent_thread_id / thread_source=subagent（见 research/codex-header-comparison-20260910 的 CLI 抓包）。线上实测单个号 24h 内有 150–230 个不同客户端会话，全部压在一个上游会话下，是真实客户端产生不出来的形态。
+- thread_id 原来只由 session-id 头派生，于是客户端真正开多线程时会被挤进同一个线程；客户端自带的 parent_thread_id 又原样透传，父子两边派生口径不同，会出现"自己当自己父线程"。两处一起修。
+- 会话池必须显式开启（缺省 1）：#5610 的教训是收敛强度不能在升级时静默改变。缺省账号升级后出站身份与上线前逐字节一致。
+- 根线程选举表是进程级内存状态（键为 账号身份 × 会话序号，6h 空闲过期，容量上界 20000，机会式清扫）。重启后重新选举，代价是子代理角色变一次。只有根线程自己的请求续期，避免根线程下线后子代理还挂着它。
+
+### Notes & Caveats
+- 这一组改动是消除"不可能的结构"，和速度、降智没有直接关系：10-10 的数据表明快慢只取决于 workspace，两种模式下都有快号和慢号。
+- 会话数越大越像"一台设备开了很多会话"，越小越像"一个会话里挂了很多子代理"。两边都是人造痕迹，只能取舍，不能消除。线上按每小时 2–7 个并发客户端会话取 8。
+- prompt_cache_key 仍然在等于 body session_id 时改写成会话级常量，没有改。会话池开启后它跟着分桶后的会话走，仍然是同桶客户端共用，待后续评估是否改成按线程。
+- full 模式不参与会话池（线程恒等于会话），device / capacity 模式完全不受影响。
+- 线上已对 719 个 session 模式账号设 `codex_fingerprint_sessions=8`（并发客户端会话每小时 2–7 个、24h 去重 150–230 个）。capacity 模式账号未改。开启后 5 分钟：0 panic、0 客户端可见错误、0 个上游 401/403/409，TTFT p50 3.5s，缓存命中从 95.2% 掉到 91.5%（session_id 变化带来的一次性 prompt_cache_key 冷启动）。
+- 测试：后端 `go test -tags=unit ./...` 只剩两个存量失败。新增 11 个用例：缺省不启用时逐字节保持旧身份、thread_id 与旧值一致的条件、会话分散、根线程选举与子代理标记三载体一致、根角色跨请求稳定、客户端自带父线程的映射与同会话、窗口编号保留、线程引用字段映射、只有 body 声明时头体一致、任期过期重新选举、会话数边界。
+
+## [0.2.14-session-capacity-antistorm.30] - 2026-10-10
+### Features
+- 指纹收敛 session/full 模式的出站 turn_id 跟随客户端回合：由账号种子 + 客户端原始 turn_id 确定性派生（客户端是 UUIDv7 时保留其毫秒时间戳，输出仍是 v7 格式），`turn_started_at_unix_ms` 沿用客户端值；客户端没给开始时间时不再补当前时间。turn metadata 里的 `root_turn_id` / `parent_turn_id` 按同一规则改写，`root_turn_id == turn_id` 的关系保持不变。
+
+### Design Rationale
+- 此前 session/full 模式每个请求都生成随机 UUIDv7 turn_id，并把开始时间写成当前时间。上游因此把同一回合里的每个续轮请求都看成新回合，同时又收到上一回合签发的 `x-codex-turn-state`，两者自相矛盾；`root_turn_id` 还原样保留客户端值，和改写后的 turn_id 对不上。真实 Codex 在回合内这两个值保持不变（见 research/codex-header-comparison-20260910 的 CLI 抓包）。
+- capacity 模式本来就用 `codexCapacityNode` 做确定性映射，这次没动。
+- 回合来源优先取 `x-codex-turn-metadata` 请求头，其次是 body 的 `client_metadata`。同一客户端每次请求带的载体相同，所以选到的来源在回合内稳定。头和体改写共用同一份 ids，第一次写出后不再变更，保证同一请求的头和体是同一个 turn_id。
+
+### Notes & Caveats
+- 这个修复解释不了 10-10 观察到的 workspace 快慢差异：最快的 ws 65d9（14797–14800）本身就是 session 模式，修复前回合内重发 turn_state 的比例就只有约 11%；其他 workspace 不论 session 还是 capacity 模式都在 98–100%。上线后头 5 分钟两边分别是 4% 和 100%，没变。
+- 客户端只在 body 里声明回合、又引用了更早回合的 `root_turn_id` 时，因为 body 的 turn_id 已经过账号身份命名空间改写，两次派生的来源不同，跨回合的引用可能对不上。真实 Codex 走请求头，碰不到这种情况。
+- 测试：后端 `go test -tags=unit ./...` 只剩两个存量失败。新增：回合内稳定、不同回合不同、跨账号不同、v7 时间戳保留、缺开始时间时不补、无回合标识时保留随机兜底、只有 body 声明时头和体一致、root/parent_turn_id 跟随。
+
+## [0.2.14-session-capacity-antistorm.29] - 2026-10-09
+### Features
+- 关闭训练数据共享改为可选，默认不做：新增 `gateway.openai_auto_disable_training`（默认 false）。关闭时导入、新建、批量导入、管理端刷新、后台刷新都不再 PATCH `chatgpt.com/backend-api/settings/account_user_setting?feature=training_allowed&value=false`；管理端「设置隐私」按钮（`POST /admin/accounts/:id/set-privacy`）照常可用。
+- 刷新不再连带查询账号信息：`enrichTokenInfo` 区分导入和刷新。授权码导入仍查 accounts/check + subscriptions；刷新路径只在 id_token 没带 plan_type（如 Mobile RT）时才回退查询。
+- 去掉发往上游的 "sub2api" 字样：
+  - Claude Code todo 守卫标签 `<sub2api-claude-code-todo-guard>` 改为 `<todo_list_consistency>`
+  - spark 能力提示 `<sub2api-codex-spark-image-unsupported>` 改为 `<model_capability_notice>`
+  - 图像桥接提示 `<sub2api-codex-image-generation>` 改为 `<image_generation_notice>`
+  - 保留工具名 `python` 的别名 `python__sub2api` 改为 `python_tool`
+  - bps 兜底 call_id 前缀 `call_sub2api_bps_native_` 改为 `call_`；bps 注入文案删掉 "relayed by an external … client / proxy instruction"
+- OpenAI API-key 账号的上游计费探测不再请求 `api.openai.com/v1/sub2api/billing`：官方域与其他平台一样直接记 unsupported。
+- 后台 token 刷新检查间隔加 ±20% 随机抖动（原为固定周期 ticker）。
+
+### Design Rationale
+- 10-09 发现所有 sub2api 部署在导入和每次刷新时都发出同一组请求：token → accounts/check →（subscriptions）→ 隐私 PATCH，几毫秒内连发，chatgpt.com 部分统一用 req 库的 Firefox 伪装（之前是 Chrome）。这组请求本身就是托管特征，还会把管理员手动打开的共享设置改回去：10-09 用户脚本把 28 个号改成 `training_allowed=true` 后，14634 在下一次刷新时又被关掉。
+- 刷新不查 accounts/check 的代价是 `subscription_expires_at` 不再随刷新更新。这个字段只用于展示（含影子号的母号到期时间），不参与调度。plan_type 一直以 id_token 为准，行为不变。
+- 字样替换只是去掉明文标记。注入的守卫和提示文本在各部署之间仍然一致，彻底消除要去掉注入本身，代价是对应的兼容修复失效，所以这次没动。
+- 管理页 usage 主动探测（`codex-auto-review` + "hi"）保留：只由管理页、手动查询、渠道监控触发，生产 24h 只有 26 次 batch 调用。调度读的是真实响应头被动更新的 codex_* 快照，阈值判定对过期快照和已到重置时间的窗口有兜底，不依赖这个探测。
+
+### Notes & Caveats
+- 升级后不会主动改动任何账号的上游共享设置，也不会改写已有的 `extra.privacy_mode`。
+- 关于"关掉 private 后报错少了"：10-09 19:06 打开共享前，过载比例从 18:00 的 33% 降到了 18:50 的 14%，打开后维持在 14–19%；还没打开的 10 个号当时都已没有流量，没有同时段的对照组，现有数据不能说明两者有因果。
+- 同步修改了本机巡检脚本 `openai-team-import/watchdog.py`（不在本仓库）：不再每 15 分钟刷新 watchlist 里的健康号；只探测近 48h 新变成 error 的号，每轮最多 10 个；确认死亡的 7 天内不再重复探测；历史死号不再逐条写日志（cron.log 已涨到 5.8G）。
+- 测试：后端 `go test -tags=unit ./...` 只剩两个存量失败（TestConfigKeysAreEnvReachable 的 8 个 ticket 键、TestAPIContracts）。新增：开关关闭时 Ensure 和刷新都不发 PATCH、手动按钮仍生效、刷新时 plan 已知不查 accounts/check、OpenAI 官方域计费探测不发请求。前端没有改动，沿用 .28 的 dist（176 个资源校验一致）。
+
 ## [0.2.14-session-capacity-antistorm.28] - 2026-10-08
 ### Features
 - 合并上游 v0.2.12–v0.2.14（31 个非合并提交）：

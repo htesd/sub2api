@@ -1046,6 +1046,11 @@ type GatewayConfig struct {
 	// ForcedCodexInstructionsTemplate: 启动时从模板文件读取并缓存的模板内容。
 	// 该字段不直接参与配置反序列化，仅用于请求热路径避免重复读盘。
 	ForcedCodexInstructionsTemplate string `mapstructure:"-"`
+	// OpenAIAutoDisableTraining: 导入 / 新建 / 刷新 OpenAI OAuth 账号时是否自动关闭 ChatGPT
+	// 「用我的内容改进模型」（PATCH chatgpt.com/backend-api/settings/account_user_setting）。
+	// 默认关闭：该请求各部署完全一致，会暴露托管特征，且会覆盖管理员手动打开的共享设置。
+	// 管理端「设置隐私」按钮不受影响。
+	OpenAIAutoDisableTraining bool `mapstructure:"openai_auto_disable_training"`
 	// OpenAIPassthroughAllowTimeoutHeaders: OpenAI 透传模式是否放行客户端超时头
 	// 关闭（默认）可避免 x-stainless-timeout 等头导致上游提前断流。
 	OpenAIPassthroughAllowTimeoutHeaders bool `mapstructure:"openai_passthrough_allow_timeout_headers"`
@@ -2494,6 +2499,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.disable_codex_identity_enforcement", false)
 	viper.SetDefault("gateway.disable_codex_originator_normalization", false)
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
+	viper.SetDefault("gateway.openai_auto_disable_training", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
 	viper.SetDefault("gateway.openai_compact_model", "gpt-5.5")
 	viper.SetDefault("gateway.openai_codex_ticket.enabled", false)
