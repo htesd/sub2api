@@ -1,3 +1,19 @@
+## [0.2.14-session-capacity-antistorm.33] - 2026-10-13
+### Features
+- 修复 capacity 模式登记表的内存泄漏。.31 连续运行 58 小时后 RSS 涨到 22.7G，几乎占满 139 的 32G 内存；09-30 .25 被 OOM 杀掉也是同一个原因。
+  - `rememberResponse`：response id 是 `gjson.ParseBytes` 回包副本里的子串，原来直接存进 `binding.Responses`。现在改为先 `strings.Clone` 一份再存。
+  - `reserve`：新建绑定时，`in.Thread` 也改为 `strings.Clone` 后再作为 map key 存储。只带 `prompt_cache_key` 的客户端，这个值来自请求体的零拷贝视图（`parseRawJSONView`）。
+
+### Design Rationale
+- Go 的子串与原字符串共享底层内存。登记表每条记录保留 24 小时（每个线程最多 256 条，每个账号最多 1 万个绑定），一个 55 字节的 id 就会把整份 `response.completed` 一起留住。这份回包回显 instructions 和 tools，带着加密推理，还有每条消息的用量明细，中位数约 137KB，最大约 2.2MB。
+- 修复放在写入登记表的那两处，而不是解析入口。这样无论调用方来自 HTTP、WS 还是以后新增的路径，存进去的都是独立副本。其他 map 存的是现算的 uuid、账号凭据，或固定长度的摘要，不受影响。
+- 定位方式：生产二进制没有 pprof，所以对 `/proc/PID/mem` 做只读扫描。.32 运行 1.5 小时时，有 2026 份回包（约 361MiB）被指向偏移 +7（`{"id":"` 之后）的指针钉住；同期 capacity 账号的请求数是 1796。持有者是 40 字节一条的 `{string, time.Time}` 记录。
+
+### Notes & Caveats
+- 新增 `openai_codex_capacity_retention_test.go`。修复前，16 个 2MiB 的回包会留下 31.6MB 的存活堆；修复后测试通过。`go test -tags=unit ./...` 只剩两个存量失败（TestConfigKeysAreEnvReachable、TestAPIContracts）。
+- session 模式账号不经过这张登记表。请求体里还有约 250 个指针指向 `model` 值，判断是在途请求，尚未验证；上线后观察 RSS 是否走平来确认。
+- 前端没有改动，沿用 .31 的 dist。
+
 ## [0.2.14-session-capacity-antistorm.32] - 2026-10-13
 ### Features
 - 从上游 v0.2.15 摘取 Grok 相关的 4 个提交（cherry-pick -x，保留上游作者）：

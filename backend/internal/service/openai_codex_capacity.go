@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -388,6 +389,9 @@ func (r *codexCapacityRegistry) reserve(identity string, p CodexSessionCapacityP
 	key := codexCapacityBindingKey{in.Key, in.Thread}
 	b := a.Bindings[key]
 	if b == nil {
+		// in.Thread 可能是请求体零拷贝视图里的子串（只带 prompt_cache_key 的客户端），
+		// 绑定要留 24 小时，必须存独立副本，否则整份请求体跟着被钉住。
+		key.Thread = strings.Clone(key.Thread)
 		b = &codexCapacityBinding{Assignment: out, Responses: make(map[string]time.Time), Ephemeral: in.Ephemeral}
 		a.Bindings[key] = b
 	}
@@ -465,7 +469,9 @@ func (l *codexCapacityLease) rememberResponse(id string, now time.Time) {
 		}
 		delete(b.Responses, oldest)
 	}
-	b.Responses[id] = now
+	// id 来自 gjson 解析回包，是整份 response.completed 的子串；不复制就会让每个
+	// 回包（几十 KB 到几 MB）陪着这条记录留 24 小时。
+	b.Responses[strings.Clone(id)] = now
 }
 
 // codexCapacityOccupancy 是准入决策的可观测快照，用于把"为什么被拒"落到日志里。
